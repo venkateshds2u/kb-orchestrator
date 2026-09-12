@@ -24,6 +24,9 @@ Status: **under construction** — this README grows as the project does. See
 ```bash
 cd project-3-orchestrator
 uv sync --dev
+cp .env.example .env
+# edit .env: set KB_ORCHESTRATOR_KB_AGENT_BASE_URL and
+# KB_ORCHESTRATOR_KB_AGENT_AUTH_TOKEN (kb-agent's own KB_AGENT_HTTP_AUTH_TOKEN)
 ```
 
 ## Running checks locally

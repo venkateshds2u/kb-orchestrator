@@ -33,6 +33,33 @@ lives entirely on the other side of that boundary.
 
 ## Decisions log
 
+### Step 2 — Config & logging
+- **Logs to stdout -- a third, independently-derived choice, not copied
+  from either prior project.** Checked what justified each predecessor's
+  choice before picking this project's own: kb-mcp-server uses stdout
+  because the MCP SDK's `stdio_server()` claims the real stdout descriptor
+  for the wire protocol and diverts anything else writing to the old
+  `sys.stdout` object onto stderr instead -- so stdout is genuinely
+  contested there. kb-agent uses stderr because *it* has a real,
+  contested use for stdout: an interactive CLI (Step 10) printing the
+  assistant's replies. kb-orchestrator has no interactive CLI and no wire
+  protocol living on its stdout -- nothing competes for that descriptor --
+  so the more conventional destination (12-factor apps: write logs to
+  stdout, let the runtime collect them) is correct here without needing to
+  invent a reason to diverge from either predecessor.
+- **`kb_agent_base_url` is `HttpUrl`, not a plain `str`.** Real validation
+  at startup (a malformed URL fails loudly and specifically at process
+  start) rather than surfacing later as a confusing `httpx` connection
+  error the first time a workflow step actually tries to call kb-agent --
+  same fail-fast-on-shape philosophy as every other required setting
+  across this curriculum.
+- **No retry/HITL/tracing/own-HTTP-API settings yet.** Each belongs with
+  its own step (8, 9, 10, 11 respectively) once the actual design for that
+  concern exists -- adding placeholder config fields now, before there's
+  any code that reads them, would be speculative surface area with nothing
+  to validate against. Same restraint Project 2 applied to its own Step
+  8/11 settings.
+
 ### Step 0 — Concepts
 - **Hand-roll the workflow engine (state machine + SQLite persistence),
   not an existing workflow library (Temporal, Prefect, ...).** Named

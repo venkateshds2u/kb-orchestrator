@@ -5,6 +5,33 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Step 2 — Config + logging
+- `config.py`: `Settings` with `KB_ORCHESTRATOR_`-prefixed env vars,
+  required `kb_agent_base_url` (`HttpUrl` -- real URL validation at
+  startup, not just a string) and `kb_agent_auth_token` (`SecretStr` --
+  the bearer token this app authenticates *as a client* to kb-agent's own
+  HTTP API), `get_settings()` cached factory. No workflow-specific
+  settings yet (retry policy, HITL, tracing, this app's own HTTP API host/
+  port) -- each deferred to its own step, same precedent as Project 2's
+  Step 8/11 settings arriving with their steps rather than upfront.
+- `logging.py`: same structlog+stdlib bridge pattern as both prior
+  projects, but writes to **stdout** -- a third, independently-reasoned
+  choice, not copied from either. kb-mcp-server uses stdout because
+  nothing else needs that descriptor (its real stdout use, the MCP wire
+  protocol, is diverted elsewhere by the SDK); kb-agent uses stderr
+  specifically because its own stdout is claimed by an interactive CLI
+  (Step 10). kb-orchestrator has neither conflict -- no wire protocol, no
+  CLI -- so stdout, the conventional destination for a plain backend
+  service (12-factor: write logs to stdout, let the runtime collect them),
+  is the correct default here.
+- `tests/conftest.py`: shared `REQUIRED_SETTINGS_FIELDS` TypedDict (using
+  `HttpUrl`/`SecretStr`, not plain `str` -- mypy's synthesized constructor
+  expects each field's declared type exactly, same gap Project 2's own
+  conftest.py documents) + global state reset fixture.
+- 13 tests, `mypy --strict`/`ruff` clean, pre-commit passing on the first
+  run (the pre-populated `additional_dependencies` from Step 1 paid off,
+  same as both prior projects' Step 2s).
+
 ### Step 1 — Repo scaffold, tooling, CI
 - `pyproject.toml`: project metadata, runtime deps (`httpx`, `pydantic`,
   `pydantic-settings`, `structlog`, `aiosqlite`, `starlette`, `uvicorn`),
