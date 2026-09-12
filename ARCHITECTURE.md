@@ -33,6 +33,62 @@ lives entirely on the other side of that boundary.
 
 ## Decisions log
 
+### Step 3 — Workflow/step domain model
+- **`Step`/`Workflow` are frozen, matching Project 1's `Note` -- not a
+  mutable, progressively-updated stateful object.** Considered explicitly:
+  a mutable domain model (`step.status = "running"`, updated in place)
+  would read naturally for something that changes many times over a
+  workflow's life, but it's inconsistent with how *both* prior projects
+  modeled entities that change over time -- Project 1's `Note` is
+  immutable, with the database as the actual source of mutable truth and
+  every read producing a fresh snapshot; Project 2's `LoopResult` is a
+  frozen dataclass, always constructed fresh, never mutated. Following
+  that precedent here means "advancing" a step is a future operation that
+  produces a *new* `Step`/`Workflow` (likely via `model_copy(update=...)`)
+  -- exactly mirroring how Project 1's `update_note` produces a new `Note`
+  rather than mutating an existing one, and setting up Step 4's
+  persistence layer to be the actual owner of state transitions, the same
+  role Project 1's repository plays for `Note`.
+- **`Workflow.status` is derived, never stored.** Storing it as an
+  independent field would create two sources of truth (the stored status,
+  and what the steps' own statuses actually say) that could disagree --
+  e.g. a workflow manually marked `succeeded` while one of its steps is
+  still `failed`. A `@property` computed fresh from `self.steps` every
+  time makes that disagreement structurally impossible, the same
+  "don't duplicate a truth that can drift" reasoning behind Project 1's
+  `Page.has_more`. This also simplifies Step 4's persistence design before
+  it's even designed: only `Step` rows need a `status` column; `Workflow`
+  never needs one, since it's always recomputed from whatever `Step` rows
+  say.
+- **`depends_on` as a plain list of predecessor ids, not a separate
+  "step type" enum (sequential vs. parallel).** A step with an empty
+  `depends_on` can run as soon as the workflow starts -- if several steps
+  are all empty, they're implicitly parallel; if each depends on the one
+  before it, that's implicitly sequential. One structure expresses both
+  shapes Steps 6 and 7 need, without the domain model needing to know
+  which shape a given workflow uses.
+- **Structural validation only -- self-dependency and unknown-reference
+  checks, not full cycle detection.** A two-step cycle (A depends on B,
+  B depends on A) is *not* rejected by this model as written: catching it
+  would need a graph traversal (DFS/topological sort), which is exactly
+  the algorithm Steps 6/7's execution engine needs anyway to compute a
+  run order. Building that algorithm twice -- once here just to validate,
+  once there to actually execute -- would be duplicated logic for a
+  concern (arbitrary-length cycles) that self-dependency and
+  unknown-reference checks don't fully cover, but narrower, structural
+  invariants are worth enforcing at construction time either way. Flagged
+  here explicitly as a known gap this model does not close, not an
+  oversight: Step 6/7 must reject cycles as part of building an execution
+  order, since a naive executor would otherwise wait forever on a step
+  that can never become unblocked.
+- **`id`/`created_at`/`updated_at` have no defaults.** Exactly Project 1's
+  `Note` precedent: generating an id or a timestamp is a decision belonging
+  to whatever code actually creates a workflow (a future builder/service
+  layer), not something that should happen invisibly inside the model
+  every time one gets constructed -- including in every test, which is
+  why explicit values are threaded through every fixture in this step's
+  own tests rather than relying on a hidden default.
+
 ### Step 2 — Config & logging
 - **Logs to stdout -- a third, independently-derived choice, not copied
   from either prior project.** Checked what justified each predecessor's

@@ -5,6 +5,38 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Step 3 — Workflow/step domain model
+- `domain/models.py`: `Step` (one message to send to kb-agent -- `name`,
+  `message`, `depends_on`, `status`, `result`/`error`) and `Workflow` (a
+  named collection of `Step`s). Both frozen (`ConfigDict(frozen=True)`),
+  matching Project 1's `Note` -- "updating" a step's state means
+  constructing a new one, not mutating in place; a future
+  persistence/execution layer owns that, not this module.
+- `Step.depends_on` (a list of predecessor step ids) is the one structure
+  expressing both sequential chains and independent, parallel steps --
+  no separate "step type" needed for either, and it's exactly the shape
+  Steps 6/7 need to build a real execution order from.
+- `Workflow.status` is a derived `@property`, not a stored field:
+  computed from its steps' statuses every time it's read, so it can never
+  drift out of sync with what the steps actually say happened. Precedence
+  when steps disagree: any `failed` step makes the whole workflow
+  `failed`, even alongside successes; `waiting_for_approval` outranks
+  `running`; only every step `succeeded` makes the workflow `succeeded`.
+- `id`/`created_at`/`updated_at` have no defaults, matching Project 1's
+  `Note` exactly -- generating them is a future service/builder layer's
+  job (Steps 4/6), not something this module does implicitly.
+- Structural validation only, not execution-order validation: a step
+  can't depend on itself, and every `depends_on` id must reference a real
+  step in the same workflow. Full cycle detection/topological ordering is
+  deferred to Steps 6/7, which actually need to compute an execution
+  order -- adding a graph-traversal algorithm here, before anything
+  consumes it, would be speculative.
+- 15 new tests: field validation (blank name/message rejected,
+  self-dependency rejected, unknown-dependency-reference rejected,
+  frozen-ness), and 8 covering `Workflow.status`'s precedence rules
+  directly, including the two-failure-modes-at-once edge cases (a failure
+  alongside a success; a failure alongside a pending approval).
+
 ### Step 2 — Config + logging
 - `config.py`: `Settings` with `KB_ORCHESTRATOR_`-prefixed env vars,
   required `kb_agent_base_url` (`HttpUrl` -- real URL validation at
