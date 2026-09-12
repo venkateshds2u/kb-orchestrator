@@ -1,14 +1,16 @@
 """Shared pytest fixtures and test data."""
 
 import logging
-from collections.abc import Generator
+from collections.abc import AsyncIterator, Generator
 from typing import TypedDict
 
+import aiosqlite
 import pytest
 import structlog
 from pydantic import HttpUrl, SecretStr
 
 from kb_orchestrator.config import get_settings
+from kb_orchestrator.db.migrator import apply_migrations
 
 
 class RequiredSettingsFields(TypedDict):
@@ -29,6 +31,24 @@ REQUIRED_SETTINGS_FIELDS: RequiredSettingsFields = {
     "kb_agent_base_url": HttpUrl("http://127.0.0.1:8000"),
     "kb_agent_auth_token": SecretStr("test-token"),
 }
+
+
+@pytest.fixture
+async def db_connection() -> AsyncIterator[aiosqlite.Connection]:
+    """An in-memory, fully-migrated SQLite connection, fresh per test.
+
+    In-memory (`:memory:`) rather than a temp file: no cleanup needed, and
+    it's an order of magnitude faster -- there's no reason to touch disk
+    for tests that don't specifically exercise file-path/persistence
+    behavior (same reasoning as Project 1's identical fixture).
+    """
+    connection = await aiosqlite.connect(":memory:")
+    connection.row_factory = aiosqlite.Row
+    await apply_migrations(connection)
+    try:
+        yield connection
+    finally:
+        await connection.close()
 
 
 @pytest.fixture(autouse=True)

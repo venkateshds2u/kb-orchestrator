@@ -60,6 +60,23 @@ class Workflow(BaseModel):
     updated_at: datetime
 
     @model_validator(mode="after")
+    def _step_ids_are_unique(self) -> Self:
+        """Step ids are scoped to their workflow (Step 4's persistence
+        schema keys steps on `(workflow_id, id)`, not a bare global `id`)
+        -- a caller can reuse "research"/"draft" across many workflows, but
+        not twice in the *same* one. Without this check, two same-id steps
+        would silently collapse into one entry in the `known_ids` set the
+        next validator builds, masking a real data problem instead of
+        rejecting it -- a gap found while designing Step 4's schema, fixed
+        here rather than left as a trap for whatever persists this later.
+        """
+        ids = [step.id for step in self.steps]
+        duplicates = sorted({step_id for step_id in ids if ids.count(step_id) > 1})
+        if duplicates:
+            raise ValueError(f"duplicate step id(s) within workflow: {duplicates}")
+        return self
+
+    @model_validator(mode="after")
     def _dependencies_reference_real_steps(self) -> Self:
         known_ids = {step.id for step in self.steps}
         for step in self.steps:

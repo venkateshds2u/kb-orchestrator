@@ -6,6 +6,7 @@ startup rather than surfacing as a confusing error deep inside a request.
 """
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import HttpUrl, SecretStr, field_validator
@@ -43,6 +44,11 @@ class Settings(BaseSettings):
     # Step 11) -- this is the token this app authenticates *as a client*,
     # kept out of repr()/str() so it can't end up in a stray log line.
     kb_agent_auth_token: SecretStr
+
+    # Where workflow state is persisted (Step 4). A relative default, same
+    # shape as kb-mcp-server's own `db_path` -- not validated for existence
+    # here, `open_database` creates the parent directory itself.
+    db_path: Path = Path("./data/workflows.sqlite3")
 
     @field_validator("log_level", mode="before")
     @classmethod

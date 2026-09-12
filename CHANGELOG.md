@@ -5,6 +5,47 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Step 4 — SQLite-backed workflow persistence
+- `config.py`: `db_path: Path` (default `./data/workflows.sqlite3`), same
+  shape as kb-mcp-server's own `db_path` -- not validated for existence,
+  `open_database` creates the parent directory itself.
+- `db/migrator.py` + `db/migrations/0001_create_workflows.sql`: the exact
+  same generic migration runner as Project 1's, copied verbatim -- there's
+  nothing project-specific about "run unapplied .sql files once, track
+  what ran." Schema: `workflows` (id, name, timestamps -- no `status`
+  column; it's always derived from `steps`, per Step 3's design) and
+  `steps`, keyed on a **composite** `(workflow_id, id)` primary key so
+  step ids are scoped per-workflow, not globally unique.
+- `db/connection.py`: `open_database()`, identical structure to Project
+  1's -- one long-lived connection (SQLite serializes writes regardless of
+  pool size), WAL mode for concurrent reads.
+- `db/repository.py`: `WorkflowRepository` works directly with the domain
+  `Workflow`/`Step` models (Step 3) rather than introducing a parallel
+  "Record" type the way Project 1's `NoteRecord`/`Note` split does --
+  there's no present divergence between a row and the domain shape to
+  justify a second type hierarchy here. `depends_on` (no native SQLite
+  array type) is JSON-encoded/decoded privately inside this module, the
+  one place that's allowed to know that's a storage detail.
+- `domain/errors.py` (new): `WorkflowNotFoundError`, matching Project 1's
+  `NoteNotFoundError` pattern.
+- `domain/service.py` (new): `StepSpec` (a caller's input for one step --
+  id/name/message/depends_on) and `WorkflowService` (id/timestamp
+  assignment, `WorkflowNotFoundError` on a missing read) -- matching
+  Project 1's `NoteService` split exactly: no SQL here, a repository is
+  injected in.
+- **Retroactive fix to Step 3's domain model, found while designing this
+  step's schema**: `Workflow` was missing a check for duplicate step ids.
+  Two steps sharing an id would have silently collapsed into one entry in
+  the `known_ids` set the dependency-reference validator builds, masking
+  a real data problem. Added `_step_ids_are_unique`, plus a test proving
+  it -- exactly the kind of gap this curriculum's discipline (build the
+  next thing, let it surface what the last thing missed) exists to catch.
+- 20 new tests across `test_connection.py`, `test_migrator.py`,
+  `test_repository.py` (including step-id scoping across two different
+  workflows, `depends_on` JSON round-tripping, and a full write-then-read
+  proving `Workflow.status`, a derived property, correctly reflects
+  updated step state after persistence), and `test_service.py`.
+
 ### Step 3 — Workflow/step domain model
 - `domain/models.py`: `Step` (one message to send to kb-agent -- `name`,
   `message`, `depends_on`, `status`, `result`/`error`) and `Workflow` (a

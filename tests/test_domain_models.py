@@ -50,6 +50,17 @@ def test_step_is_frozen() -> None:
         step.status = "running"
 
 
+def test_workflow_rejects_duplicate_step_ids() -> None:
+    with pytest.raises(ValidationError):
+        Workflow(
+            id="w1",
+            name="wf",
+            steps=[_step("a"), _step("a")],
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+
+
 def test_workflow_rejects_dependency_on_unknown_step() -> None:
     with pytest.raises(ValidationError):
         Workflow(

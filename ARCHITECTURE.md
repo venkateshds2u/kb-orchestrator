@@ -33,6 +33,69 @@ lives entirely on the other side of that boundary.
 
 ## Decisions log
 
+### Step 4 — SQLite-backed workflow persistence
+- **`WorkflowRepository` works directly with domain `Workflow`/`Step`,
+  not a parallel `WorkflowRecord`/`StepRecord` hierarchy -- a deliberate
+  departure from Project 1's `NoteRecord`/`Note` split, not an
+  oversight.** Project 1 justified that split by naming a plausible future
+  divergence (a soft-delete flag that shouldn't be exposed to callers).
+  The same kind of justification was considered here (Step 8's retry
+  count could plausibly be a row-only field) and rejected for now: there
+  is *zero* present divergence between what a row looks like and what the
+  domain model already validates, and introducing a second, near-identical
+  type hierarchy purely on the chance of a future need is exactly the
+  speculative generality this curriculum's own principles rule out
+  elsewhere. If Step 8 does introduce row-only fields, that's the point
+  where this decision gets revisited -- not before.
+- **`steps` is keyed on a composite `(workflow_id, id)` primary key, not a
+  bare global `id`.** Considered explicitly while designing the schema:
+  step ids are meant to be short, human-chosen, memorable labels
+  ("research", "draft", "approve") that a caller picks when defining a
+  workflow (see `service.py`'s `StepSpec` -- steps do NOT get
+  server-generated ids the way the workflow itself does). A bare global
+  primary key would make "research" usable as a step id exactly once,
+  ever, across every workflow anyone creates -- clearly wrong. Scoping
+  uniqueness to one workflow, the same way Airflow scopes `task_id` to one
+  DAG rather than the whole system, is what actually matches how these
+  ids are meant to be used.
+- **This scoping decision is *why* `StepSpec` (caller-supplied step
+  definitions) works at all without a two-phase "create then patch in
+  real ids" dance.** If step ids had to be server-generated (like the
+  workflow's own UUID), a caller wanting step B to depend on step A
+  couldn't write that dependency before A's id existed -- some kind of
+  temporary-reference indirection would be needed. Letting the caller
+  choose stable ids up front sidesteps that problem entirely: `StepSpec(id
+  ="draft", depends_on=["research"])` is just valid data, no placeholder
+  resolution required.
+- **A real gap found while designing this step, fixed retroactively in
+  Step 3's file, not worked around here.** Realizing `steps` needed a
+  composite key (not a bare one) surfaced a matching gap in the domain
+  model: nothing had ever checked that a workflow's own step ids were
+  unique *within* that workflow. Two same-id steps would silently collapse
+  into one entry in the `known_ids` set the dependency-reference validator
+  builds off of, masking a real data-integrity problem instead of
+  rejecting it. Fixed at the source (`domain/models.py`), with a test,
+  rather than only enforced at the database layer (a `UNIQUE` constraint
+  alone would surface this as an opaque `sqlite3.IntegrityError` from deep
+  inside a repository call, not a clear validation error at construction
+  time where the problem actually originates).
+- **`Workflow` has no `status` column in the schema, matching Step 3's own
+  decision that it's a derived property, never stored.** Only `steps` need
+  a `status` column; reconstructing a `Workflow` on every read re-runs its
+  structural validators too, so corrupted or hand-edited data fails loudly
+  at read time instead of being trusted silently by whatever queries it
+  next.
+- **`get_workflow` returns `None` on a missing row (repository layer);
+  `WorkflowService.get_workflow` raises `WorkflowNotFoundError` instead
+  (service layer).** Exactly Project 1's `NoteRepository`/`NoteService`
+  split: a missing row is data at the persistence layer (the caller might
+  legitimately want to check-and-create), but a genuine business error
+  once something asks for a *specific* workflow it expects to exist.
+- **The migration runner is copied verbatim from Project 1, not
+  reimplemented.** "Apply unapplied `.sql` files in order, track what
+  ran" has nothing project-specific in it -- rewriting it differently here
+  would be change for its own sake, not a real design decision.
+
 ### Step 3 — Workflow/step domain model
 - **`Step`/`Workflow` are frozen, matching Project 1's `Note` -- not a
   mutable, progressively-updated stateful object.** Considered explicitly:
