@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+dist/
+*.egg-info/
+.env
+.env.*
+!.env.example
+# This project persists workflow state to SQLite from Step 4 onward --
+# same entries as Project 1's .gitignore, applied proactively this time
+# instead of waiting to catch real data files committed by accident.
+data/
+*.db
+*.db-journal
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+.coverage
+htmlcov/
