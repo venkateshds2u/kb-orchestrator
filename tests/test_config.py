@@ -37,6 +37,7 @@ def test_kb_agent_base_url_must_be_a_valid_url() -> None:
     with pytest.raises(ValidationError):
         Settings(
             kb_agent_auth_token=_REQUIRED["kb_agent_auth_token"],
+            http_auth_token=_REQUIRED["http_auth_token"],
             kb_agent_base_url="not-a-url",  # type: ignore[arg-type]
         )
 
@@ -44,6 +45,7 @@ def test_kb_agent_base_url_must_be_a_valid_url() -> None:
 def test_env_prefix_overrides_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KB_ORCHESTRATOR_KB_AGENT_BASE_URL", "http://127.0.0.1:8000")
     monkeypatch.setenv("KB_ORCHESTRATOR_KB_AGENT_AUTH_TOKEN", "some-token")
+    monkeypatch.setenv("KB_ORCHESTRATOR_HTTP_AUTH_TOKEN", "some-http-token")
     monkeypatch.setenv("KB_ORCHESTRATOR_ENVIRONMENT", "production")
     monkeypatch.setenv("KB_ORCHESTRATOR_LOG_LEVEL", "debug")
 
@@ -76,5 +78,6 @@ def test_settings_is_frozen() -> None:
 def test_get_settings_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KB_ORCHESTRATOR_KB_AGENT_BASE_URL", "http://127.0.0.1:8000")
     monkeypatch.setenv("KB_ORCHESTRATOR_KB_AGENT_AUTH_TOKEN", "some-token")
+    monkeypatch.setenv("KB_ORCHESTRATOR_HTTP_AUTH_TOKEN", "some-http-token")
     get_settings.cache_clear()
     assert get_settings() is get_settings()

@@ -5,6 +5,51 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Step 11 — HTTP API
+- `config.py`: `http_host`/`http_port` (default **8001**, deliberately not
+  kb-agent's own 8000 -- both typically run on one machine during local
+  dev) and `http_auth_token` (unconditionally required -- no `mode` toggle
+  like kb-agent's, since this API *is* kb-orchestrator's whole interface).
+- New `http.py`: `POST /workflows` (create), `GET /workflows/{id}`
+  (inspect), `POST /workflows/{id}/run` (execute -- blocks until the
+  workflow finishes, fails, or pauses on an approval gate),
+  `POST /workflows/{id}/steps/{step_id}/approve`, `.../reject` (body:
+  `{"reason": "..."}`). `GET /health` is exempt from the same bearer-auth
+  scheme as kb-agent/kb-mcp-server. No separate "resume" endpoint --
+  calling `/run` again on a paused workflow *is* resuming it,
+  `run_workflow` (Step 6) already being resumable by construction.
+- Own wire models (`WorkflowBody`, `StepBody`, ...), not the domain
+  `Workflow`/`Step` serialized directly: confirmed first (not assumed)
+  that pydantic's `model_dump()` excludes plain `@property` fields, which
+  would have silently dropped `Workflow.status` -- the one field a client
+  most needs -- from every response.
+- `src/kb_orchestrator/__main__.py` (new): this project's console script
+  was declared in Step 1's `pyproject.toml` but nothing needed the module
+  to exist until this step, the same way kb-agent's own `__main__.py`
+  first became real at its Step 5.
+- **Found and fixed a real, pre-existing bug while building this step**:
+  `Step.requires_approval` (Step 9) was never wired into
+  `WorkflowRepository` -- no column, not read or written by
+  `_step_to_row`/`_row_to_step`. Step 9's own tests never caught it
+  because they mostly worked with in-memory `Workflow` objects; this
+  step's `POST /run` handler is the first code path that creates a
+  workflow in one call and re-fetches it from the database in a separate
+  one, which is exactly where a step created with `requires_approval:
+  true` silently came back `false`. Fixed with a new migration
+  (`0003_add_step_requires_approval.sql`) plus a repository-level
+  regression test proving the round trip now works.
+- Also fixed `test_running_twice_is_a_noop`'s hardcoded migration count,
+  broken a second time by this step's new migration (first broken in Step
+  8) -- now computed from the actual `migrations/` directory instead of a
+  number someone has to remember to update.
+- 15 new tests (`test_http.py`) covering auth, request validation
+  (missing fields, duplicate step ids), the full create → run → approve →
+  run-again lifecycle entirely over HTTP, and 404/409 error paths --
+  plus manually smoke-tested the real server binary end-to-end (`uv run
+  kb-orchestrator`, hit with `curl`: health, unauthorized rejection, and
+  an authorized workflow creation, with real structured logs and a clean
+  graceful shutdown).
+
 ### Step 10 — Observability
 - `execution.py`: `workflow_id` bound via `structlog.contextvars` for the
   whole `run_workflow` call, `step_id` additionally bound within

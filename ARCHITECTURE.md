@@ -33,6 +33,70 @@ lives entirely on the other side of that boundary.
 
 ## Decisions log
 
+### Step 11 — HTTP API
+- **`POST /workflows` (create) and `POST /workflows/{id}/run` (execute)
+  are separate endpoints, not one create-and-run call -- considered
+  explicitly.** A single combined endpoint would be simpler for a
+  first-time caller, but conflates two operations with very different
+  cost profiles: creating is instant, running can take as long as the
+  workflow's slowest sequential path through kb-agent. Keeping them
+  separate also means the *same* endpoint (`/run`) naturally serves both
+  "start" and "resume" -- calling it again on a paused workflow is
+  resuming, with no special-cased second endpoint needed, since
+  `run_workflow` (Step 6) is already resumable by construction. A
+  combined endpoint would have needed its own answer for "what does
+  calling this again, after a pause, even mean."
+- **No background job queue -- `/run` blocks for the whole execution,
+  named explicitly as the production alternative not built.** A real
+  production version would likely return 202 Accepted immediately and run
+  the workflow from a worker process, with a webhook or polling endpoint
+  for the result. This project has no task-queue infrastructure anywhere,
+  and building one now would be substantial new scope for a concern
+  ("don't tie up an HTTP worker for a long-running operation") this
+  curriculum never scoped in -- consistent with the standing pattern of
+  naming a real production concern rather than solving it if it isn't
+  earned yet (jitter/caps on backoff, Step 8; approver identity, Step 9).
+- **Own wire models, not the domain `Workflow`/`Step` serialized
+  directly -- verified as necessary, not a style preference.** Checked
+  first whether `Workflow.model_dump()` includes the derived `status`
+  property (Step 3) before designing around it either way: it does not --
+  pydantic's `model_dump()` only includes real fields, not plain
+  `@property` values. Serializing the domain model directly would have
+  silently shipped every workflow response missing `status`, the single
+  field a client calling this API most needs. `WorkflowBody`/`StepBody`
+  compute it explicitly at the wire boundary instead.
+- **Port 8001, not kb-agent's own 8000.** Both processes are meant to run
+  on the same machine during local development (this app calls that one
+  over HTTP) -- defaulting to the same port would mean one of them always
+  needs explicit reconfiguration just to run both at once. A different
+  default number costs nothing and avoids a real, easily-hit local-dev
+  footgun.
+- **A real, pre-existing bug, found only by building this step -- not
+  introduced by it.** `Step.requires_approval` (Step 9) was added to the
+  domain model but never wired into `WorkflowRepository`: no column, not
+  read or written by the row<->model helpers. It went undetected through
+  Steps 9 and 10 because nothing in either step's own tests happened to
+  create a workflow in one call and re-fetch it from the database in a
+  *separate* one with `requires_approval=True` still needing to survive
+  the round trip -- `run_workflow`'s own tests construct `Workflow`
+  objects directly in memory for exactly the scenarios that would have
+  caught this, and `test_create_workflow_threads_requires_approval_from_spec`
+  only checked `create_workflow`'s in-memory return value. This step's
+  `/run` handler is the first code path that genuinely separates "create"
+  and "use" into two different calls against the same stored data, which
+  is exactly the shape that surfaces a persistence gap like this one.
+  Fixed with a new migration and a repository-level regression test that
+  specifically proves the round trip -- not just re-testing what Step 9
+  already covered.
+- **The regression fix went into a new migration file (`0003_...`), not
+  a rewrite of `0001`'s schema.** Migrations in this project are
+  immutable once shipped (the whole point of the runner tracking what's
+  already applied) -- correcting `0001` retroactively would silently
+  change behavior for any database that had already run it, exactly the
+  kind of migration-history rewrite that makes a migration system
+  untrustworthy. A new, additive migration is the correct fix regardless
+  of how early the gap was introduced.
+
 ### Step 10 — Observability
 - **`structlog.contextvars`, not OpenTelemetry or any other tracing
   library -- named explicitly as the real alternative, not built.**

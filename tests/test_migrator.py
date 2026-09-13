@@ -2,7 +2,9 @@
 
 import aiosqlite
 
-from kb_orchestrator.db.migrator import apply_migrations
+from kb_orchestrator.db.migrator import MIGRATIONS_DIR, apply_migrations
+
+_EXPECTED_MIGRATION_COUNT = len(list(MIGRATIONS_DIR.glob("*.sql")))
 
 
 async def test_creates_expected_tables(db_connection: aiosqlite.Connection) -> None:
@@ -22,6 +24,7 @@ async def test_records_applied_version(db_connection: aiosqlite.Connection) -> N
 
     assert "0001_create_workflows" in versions
     assert "0002_add_step_attempt" in versions
+    assert "0003_add_step_requires_approval" in versions
 
 
 async def test_running_twice_is_a_noop(db_connection: aiosqlite.Connection) -> None:
@@ -33,4 +36,7 @@ async def test_running_twice_is_a_noop(db_connection: aiosqlite.Connection) -> N
     cursor = await db_connection.execute("SELECT COUNT(*) FROM schema_migrations")
     row = await cursor.fetchone()
     assert row is not None
-    assert row[0] == 2  # 0001 + 0002, each applied exactly once
+    # Counted from the actual migrations/ directory, not hardcoded -- the
+    # hardcoded version broke twice already (Steps 8 and 11) as new
+    # migrations were added; this version stays correct on its own.
+    assert row[0] == _EXPECTED_MIGRATION_COUNT

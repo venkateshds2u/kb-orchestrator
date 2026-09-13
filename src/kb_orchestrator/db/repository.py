@@ -31,6 +31,7 @@ def _step_to_row(workflow_id: str, step: Step, *, ordinal: int) -> dict[str, obj
         "result": step.result,
         "error": step.error,
         "attempt": step.attempt,
+        "requires_approval": int(step.requires_approval),
         "ordinal": ordinal,
         "created_at": step.created_at.isoformat(),
         "updated_at": step.updated_at.isoformat(),
@@ -47,6 +48,7 @@ def _row_to_step(row: aiosqlite.Row) -> Step:
         result=row["result"],
         error=row["error"],
         attempt=row["attempt"],
+        requires_approval=bool(row["requires_approval"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -81,10 +83,10 @@ class WorkflowRepository:
                 """
                 INSERT INTO steps
                     (workflow_id, id, name, message, depends_on, status, result, error,
-                     attempt, ordinal, created_at, updated_at)
+                     attempt, requires_approval, ordinal, created_at, updated_at)
                 VALUES
                     (:workflow_id, :id, :name, :message, :depends_on, :status, :result, :error,
-                     :attempt, :ordinal, :created_at, :updated_at)
+                     :attempt, :requires_approval, :ordinal, :created_at, :updated_at)
                 """,
                 _step_to_row(workflow.id, step, ordinal=ordinal),
             )

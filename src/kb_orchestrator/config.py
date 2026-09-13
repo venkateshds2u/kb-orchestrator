@@ -62,6 +62,19 @@ class Settings(BaseSettings):
     # most (le=10 above already bounds how large this could ever grow).
     step_retry_backoff_seconds: float = Field(default=1.0, gt=0)
 
+    # This app's own HTTP API (Step 11). No `mode` toggle like kb-agent's
+    # (cli vs http): kb-orchestrator's whole interface *is* this API --
+    # there's no interactive CLI to switch to -- so the auth token is
+    # unconditionally required, not gated behind a mode check.
+    http_host: str = "127.0.0.1"
+    # 8001, not kb-agent's own 8000: both typically run on the same
+    # developer machine during local dev (this app calls that one), and
+    # defaulting to the same port would mean one always needs explicit
+    # reconfiguration just to run both at once -- a real, easy-to-hit
+    # local-dev footgun avoided for the cost of one different number.
+    http_port: int = 8001
+    http_auth_token: SecretStr
+
     @field_validator("log_level", mode="before")
     @classmethod
     def _normalize_log_level(cls, value: object) -> object:

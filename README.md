@@ -25,8 +25,9 @@ Status: **under construction** — this README grows as the project does. See
 cd project-3-orchestrator
 uv sync --dev
 cp .env.example .env
-# edit .env: set KB_ORCHESTRATOR_KB_AGENT_BASE_URL and
-# KB_ORCHESTRATOR_KB_AGENT_AUTH_TOKEN (kb-agent's own KB_AGENT_HTTP_AUTH_TOKEN)
+# edit .env: set KB_ORCHESTRATOR_KB_AGENT_BASE_URL,
+# KB_ORCHESTRATOR_KB_AGENT_AUTH_TOKEN (kb-agent's own KB_AGENT_HTTP_AUTH_TOKEN),
+# and KB_ORCHESTRATOR_HTTP_AUTH_TOKEN (this app's own -- pick any secret)
 ```
 
 ## Running checks locally
@@ -40,4 +41,54 @@ uv run pytest -v           # tests
 
 ## Running the orchestrator
 
-Not yet available — added starting Step 5.
+```bash
+uv run kb-orchestrator
+```
+
+Serves an HTTP API on `127.0.0.1:8001` by default (a different port than
+kb-agent's own 8000, so both can run on one machine without
+reconfiguration). Every endpoint except `/health` requires
+`Authorization: Bearer <KB_ORCHESTRATOR_HTTP_AUTH_TOKEN>`.
+
+```bash
+# Define a workflow (steps run in dependency order; independent steps
+# run concurrently). This one has "draft" depend on "research", so it
+# waits for research to finish before running.
+curl -s -X POST http://127.0.0.1:8001/workflows \
+  -H "Authorization: Bearer $KB_ORCHESTRATOR_HTTP_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "research and draft",
+    "steps": [
+      {"id": "research", "name": "Research", "message": "search my notes for kafka"},
+      {"id": "draft", "name": "Draft", "message": "summarize the findings",
+       "depends_on": ["research"], "requires_approval": true}
+    ]
+  }'
+# -> {"id": "<workflow_id>", "status": "pending", ...}
+
+# Run it. Blocks until it finishes, fails, or pauses on an approval gate.
+curl -s -X POST http://127.0.0.1:8001/workflows/<workflow_id>/run \
+  -H "Authorization: Bearer $KB_ORCHESTRATOR_HTTP_AUTH_TOKEN"
+# -> {"status": "waiting_for_approval", ...} ("draft" requires approval)
+
+# Approve the paused step, then run again to let its dependents proceed
+# (or POST .../reject with {"reason": "..."} instead).
+curl -s -X POST http://127.0.0.1:8001/workflows/<workflow_id>/steps/draft/approve \
+  -H "Authorization: Bearer $KB_ORCHESTRATOR_HTTP_AUTH_TOKEN"
+curl -s -X POST http://127.0.0.1:8001/workflows/<workflow_id>/run \
+  -H "Authorization: Bearer $KB_ORCHESTRATOR_HTTP_AUTH_TOKEN"
+# -> {"status": "succeeded", ...}
+
+# Inspect a workflow at any time.
+curl -s http://127.0.0.1:8001/workflows/<workflow_id> \
+  -H "Authorization: Bearer $KB_ORCHESTRATOR_HTTP_AUTH_TOKEN"
+```
+
+A step failing blocks only its own downstream dependents, not unrelated
+independent branches, which still run to completion. A failed step is
+retried automatically (`KB_ORCHESTRATOR_STEP_MAX_ATTEMPTS`, default 3)
+with exponential backoff before being reported as `failed`. `/run` is
+resumable: calling it again on a workflow that previously paused
+(waiting on approval, or that hit a transient failure now resolved) picks
+up exactly where it left off, never re-running already-`succeeded` steps.

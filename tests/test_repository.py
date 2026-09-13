@@ -10,12 +10,13 @@ from kb_orchestrator.domain.models import Step, Workflow
 _NOW = datetime.now(UTC)
 
 
-def _step(id: str, *, depends_on: list[str] | None = None) -> Step:
+def _step(id: str, *, depends_on: list[str] | None = None, requires_approval: bool = False) -> Step:
     return Step(
         id=id,
         name=f"step-{id}",
         message="do the thing",
         depends_on=depends_on or [],
+        requires_approval=requires_approval,
         created_at=_NOW,
         updated_at=_NOW,
     )
@@ -196,3 +197,27 @@ async def test_increment_attempt_only_affects_the_named_step(
     assert fetched is not None
     step_b = next(s for s in fetched.steps if s.id == "b")
     assert step_b.attempt == 0
+
+
+async def test_requires_approval_survives_a_real_round_trip(
+    db_connection: aiosqlite.Connection,
+) -> None:
+    """Regression test: `Step.requires_approval` (Step 9) was added to the
+    domain model but never persisted -- caught only while building Step
+    11's HTTP API, where a workflow created in one request is re-fetched
+    in a separate one. Step 9's own tests never round-tripped a step with
+    `requires_approval=True` through an actual `create_workflow` +
+    `get_workflow` pair against a real database, which is exactly why the
+    gap went unnoticed until here."""
+    repo = WorkflowRepository(db_connection)
+    workflow = _workflow(
+        steps=[_step("a", requires_approval=True), _step("b", requires_approval=False)]
+    )
+    await repo.create_workflow(workflow)
+
+    fetched = await repo.get_workflow("w1")
+
+    assert fetched is not None
+    by_id = {s.id: s for s in fetched.steps}
+    assert by_id["a"].requires_approval is True
+    assert by_id["b"].requires_approval is False

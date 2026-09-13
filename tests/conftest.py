@@ -14,7 +14,7 @@ from kb_orchestrator.db.migrator import apply_migrations
 
 
 class RequiredSettingsFields(TypedDict):
-    """`Settings`'s two fields with no default. Typed (not `dict[str,
+    """`Settings`'s fields with no default. Typed (not `dict[str,
     object]`) so `Settings(**REQUIRED_SETTINGS_FIELDS, ...)` type-checks
     precisely against the real constructor -- mypy can't verify a loosely
     typed dict splat against specific parameters, but it can verify a
@@ -25,11 +25,13 @@ class RequiredSettingsFields(TypedDict):
 
     kb_agent_base_url: HttpUrl
     kb_agent_auth_token: SecretStr
+    http_auth_token: SecretStr
 
 
 REQUIRED_SETTINGS_FIELDS: RequiredSettingsFields = {
     "kb_agent_base_url": HttpUrl("http://127.0.0.1:8000"),
     "kb_agent_auth_token": SecretStr("test-token"),
+    "http_auth_token": SecretStr("test-http-token"),
 }
 
 
