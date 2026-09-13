@@ -1,5 +1,8 @@
 # kb-orchestrator
 
+[![CI](https://github.com/venkateshds2u/kb-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/venkateshds2u/kb-orchestrator/actions/workflows/ci.yml)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/downloads/)
+
 Coordinates multi-step, multi-role workflows over
 [kb-agent](../project-2-agent-app)'s HTTP+SSE API: sequencing, parallel
 fan-out, retries, human-in-the-loop pauses, and observability across a
