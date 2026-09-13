@@ -5,6 +5,32 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Step 12 — Docker
+- New `Dockerfile`, `docker-compose.yml`, `.dockerignore`: a standard
+  single-project multi-stage build -- unlike kb-agent's own Dockerfile,
+  nothing here bundles a sibling project's source, since kb-orchestrator
+  only ever talks to kb-agent over HTTP (Step 0) and never shells out to
+  `uv run` a subprocess the way kb-agent does for kb-mcp-server. The
+  runtime stage doesn't even copy in the `uv` binary, since nothing at
+  runtime needs it.
+- Non-root user (uid 1000), `KB_ORCHESTRATOR_HTTP_HOST=0.0.0.0` (binding
+  to the app's own 127.0.0.1 default inside a container would silently
+  refuse the host's port mapping), a `HEALTHCHECK` against `/health`,
+  exec-form `CMD`, workflow state in a named volume
+  (`kb-orchestrator-data:/app/data`).
+- `docker-compose.yml` requires `KB_AGENT_BASE_URL` explicitly (via
+  `${VAR:?message}`, same as the other two required secrets) -- it has no
+  sensible default, since this project has no way to know where kb-agent
+  actually runs; documented the `host.docker.internal:8000` convention
+  for the common case of both running via Docker Desktop on one machine.
+- Manually built and ran the real image end-to-end (`docker compose build`
+  / `up`, `curl` against `/health` and both auth-rejection/authorized
+  paths, plus confirming the SQLite file lands on the mounted volume with
+  correct non-root ownership) -- unlike kb-agent's own Step 12, this build
+  worked correctly on the first attempt with no runtime surprises, since
+  this image never shells out to anything (the exact category of problem
+  kb-agent's `uv run --no-sync` fix addressed doesn't apply here at all).
+
 ### Step 11 — HTTP API
 - `config.py`: `http_host`/`http_port` (default **8001**, deliberately not
   kb-agent's own 8000 -- both typically run on one machine during local

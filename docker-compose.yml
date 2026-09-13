@@ -1,0 +1,44 @@
+services:
+  kb-orchestrator:
+    build: .
+    ports:
+      - "${KB_ORCHESTRATOR_HTTP_PORT:-8001}:8001"
+    environment:
+      KB_ORCHESTRATOR_HTTP_HOST: 0.0.0.0
+      KB_ORCHESTRATOR_HTTP_PORT: 8001
+      KB_ORCHESTRATOR_ENVIRONMENT: production
+      # ${VAR:?message} -- compose refuses to start (with `message`)
+      # rather than silently launching a broken (no route to kb-agent) or
+      # unauthenticated-in-practice server. Put these in a `.env` file
+      # next to this compose file (the same one `uv run` reads -- see
+      # .env.example) or export them in the shell before `docker compose
+      # up`. KB_AGENT_BASE_URL has no sensible default here: it points at
+      # wherever kb-agent's own container/process actually runs, which
+      # this project has no way to know on its own -- for kb-agent
+      # running via Docker Desktop on the same machine, that's typically
+      # `http://host.docker.internal:8000`.
+      KB_ORCHESTRATOR_KB_AGENT_BASE_URL: ${KB_ORCHESTRATOR_KB_AGENT_BASE_URL:?set KB_ORCHESTRATOR_KB_AGENT_BASE_URL in a .env file or the shell environment}
+      KB_ORCHESTRATOR_KB_AGENT_AUTH_TOKEN: ${KB_ORCHESTRATOR_KB_AGENT_AUTH_TOKEN:?set KB_ORCHESTRATOR_KB_AGENT_AUTH_TOKEN in a .env file or the shell environment}
+      KB_ORCHESTRATOR_HTTP_AUTH_TOKEN: ${KB_ORCHESTRATOR_HTTP_AUTH_TOKEN:?set KB_ORCHESTRATOR_HTTP_AUTH_TOKEN in a .env file or the shell environment}
+    volumes:
+      # Named volume, not a bind mount -- same reasoning as both prior
+      # projects' compose files: the SQLite file (plus its WAL/SHM
+      # sidecar files) needs to survive `docker compose down` and
+      # container recreation, not be human-browsable from the host.
+      - kb-orchestrator-data:/app/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request as u,sys; sys.exit(0 if u.urlopen('http://127.0.0.1:8001/health',timeout=2).status==200 else 1)",
+        ]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  kb-orchestrator-data:

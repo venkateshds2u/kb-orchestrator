@@ -33,6 +33,38 @@ lives entirely on the other side of that boundary.
 
 ## Decisions log
 
+### Step 12 — Docker
+- **A standard single-project image, not a two-project bundle like
+  kb-agent's own -- a direct, structural consequence of Step 0's design,
+  not a separate choice made here.** kb-agent's Dockerfile had to bundle
+  kb-mcp-server's source because it spawns that server as a real stdio
+  subprocess, so both codebases must exist in the same image for that
+  subprocess to have anything to run. kb-orchestrator never spawns
+  kb-agent -- it only ever calls it over HTTP -- so there's no analogous
+  need here. The image is exactly as simple as the code's own
+  architecture already implied.
+- **`KB_AGENT_BASE_URL` has no default in `docker-compose.yml`, and is
+  required via `${VAR:?message}` like the other secrets, rather than
+  guessed at.** Unlike a bundled subprocess (a fixed, known path inside
+  the same image), kb-agent's actual network location is something this
+  project has no way to know in general -- it could be a sibling
+  container, a service on the same machine, or a real internal DNS name
+  in production. Requiring it explicitly, with a clear error if missing,
+  is more honest than defaulting to a guess (like `localhost:8000`) that
+  would silently fail to connect in most real deployments and only work
+  by coincidence in one specific local setup.
+- **The build worked correctly on the first attempt, verified rather than
+  assumed -- worth noting specifically because kb-agent's own Step 12
+  did not.** kb-agent's image failed on its first real run because `uv
+  run` (used to spawn kb-mcp-server) tried to verify/rewrite a
+  root-owned `.venv` as a non-root user. That whole category of bug
+  requires shelling out to a tool that re-checks its environment at
+  runtime -- something this image's `CMD ["kb-orchestrator"]` never does
+  (it's a single already-installed console script, not a wrapper that
+  invokes anything else). The image was still actually built and run to
+  confirm this, not assumed safe by analogy -- the same discipline
+  applied either way, it just didn't surface a new bug to fix this time.
+
 ### Step 11 — HTTP API
 - **`POST /workflows` (create) and `POST /workflows/{id}/run` (execute)
   are separate endpoints, not one create-and-run call -- considered
