@@ -33,6 +33,49 @@ lives entirely on the other side of that boundary.
 
 ## Decisions log
 
+### Step 7 — Parallel/fan-out execution
+- **A failure blocks only its downstream dependents, not the whole
+  workflow -- resolving the exact tension Step 6 flagged and deferred,
+  not a new design question.** With independent branches now real, "stop
+  everything" and "stop the affected branch" genuinely diverge for the
+  first time. The chosen behavior (block only what actually depends on
+  the failure) matches how real workflow engines behave and lets a
+  workflow's *other* useful work still complete and be reported, rather
+  than discarding independent results just because something unrelated
+  broke.
+- **Concurrency is per-wave (`asyncio.gather` over one wave at a time),
+  not a single global "run everything with unmet dependencies satisfied
+  as soon as possible" scheduler.** A wave-based design was chosen over
+  a more eagerly-reactive one (e.g., a task pool that launches a step
+  the instant its last dependency completes, without waiting for
+  sibling steps in the same "logical wave") because it's simpler to
+  reason about and test: every step in one `asyncio.gather` call is
+  guaranteed to have had its dependencies fully resolved *before* the
+  call, so `_compose_message` never needs to worry about a dependency
+  completing mid-wave. The eager alternative would start steps
+  marginally sooner in some shapes, but that's not a real requirement
+  yet, and the added scheduling complexity isn't earned by anything this
+  curriculum's own workflows need.
+- **Verified concurrency is real, not just "eventually both get called" --
+  with a counter, not a mock's call-order.** `_ConcurrencyTrackingClient`
+  proves two `send_message` calls were simultaneously in flight (an
+  in-flight counter reaching 2), which a purely sequential
+  implementation could never produce regardless of the order it calls
+  things in. This is a meaningfully stronger claim than "both steps ran"
+  -- it's evidence the implementation is actually concurrent, not
+  fast-sequential.
+- **`topological_order`'s returned *order* is now unused by
+  `run_workflow` -- only its cycle-detection side effect is kept.** The
+  wave loop computes readiness directly from `completed`/`failed_ids` at
+  each iteration, which is a different (and for this purpose, more
+  useful) notion of "order" than a single flattened list can express --
+  a flat topological order can't represent "these three steps are all
+  simultaneously eligible," only "put them somewhere consistent." Calling
+  it anyway, and discarding the list, was preferred over duplicating a
+  cycle-check algorithm a second time; one already-correct, tested
+  implementation reused for a different purpose beats two similar ones
+  drifting apart.
+
 ### Step 6 — Sequential multi-step workflows
 - **Context chains between steps by prepending a plain-text block, not a
   template language.** Considered a `{{placeholder}}` substitution scheme

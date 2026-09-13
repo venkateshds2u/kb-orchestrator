@@ -11,6 +11,7 @@ tests use a real `WorkflowRepository` backed by the in-memory
 actually needs it" pattern as Steps 4/5's own tests.
 """
 
+import asyncio
 from datetime import UTC, datetime
 
 import aiosqlite
@@ -317,3 +318,117 @@ async def test_run_workflow_on_an_already_failed_workflow_is_a_noop(
 
     assert final == workflow
     assert client.messages == []
+
+
+# --- parallel/fan-out execution (Step 7) -----------------------------------
+
+
+class _ConcurrencyTrackingClient:
+    """Tracks how many `send_message` calls were simultaneously in flight.
+    No lock needed around the counter: everything here runs on one event
+    loop, and the increment/check happens with no `await` in between, so
+    it can't be interleaved by a sibling task."""
+
+    def __init__(self) -> None:
+        self._in_flight = 0
+        self.max_concurrent = 0
+
+    async def send_message(self, message: str) -> AgentChatResult:
+        self._in_flight += 1
+        self.max_concurrent = max(self.max_concurrent, self._in_flight)
+        await asyncio.sleep(0.01)
+        self._in_flight -= 1
+        return _result(text="ok")
+
+
+async def test_run_workflow_executes_independent_steps_concurrently(
+    db_connection: aiosqlite.Connection,
+) -> None:
+    workflow = Workflow(
+        id="w1", name="wf", steps=[_step("a"), _step("b")], created_at=_NOW, updated_at=_NOW
+    )
+    repo = WorkflowRepository(db_connection)
+    await repo.create_workflow(workflow)
+    client = _ConcurrencyTrackingClient()
+
+    final = await run_workflow(client, repo, workflow)
+
+    assert client.max_concurrent == 2
+    assert final.status == "succeeded"
+
+
+async def test_run_workflow_fans_in_multiple_dependencies_into_one_message(
+    db_connection: aiosqlite.Connection,
+) -> None:
+    workflow = Workflow(
+        id="w1",
+        name="wf",
+        steps=[_step("a"), _step("b"), _step("c", depends_on=["a", "b"])],
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    repo = WorkflowRepository(db_connection)
+    await repo.create_workflow(workflow)
+    client = _ScriptedClient(
+        [_result(text="result a"), _result(text="result b"), _result(text="result c")]
+    )
+
+    final = await run_workflow(client, repo, workflow)
+
+    assert final.status == "succeeded"
+    # "c" was the third and final call -- both "a" and "b" had already
+    # completed (a real wave-ordering guarantee, not just call count).
+    assert "result a" in client.messages[2]
+    assert "result b" in client.messages[2]
+
+
+async def test_run_workflow_independent_branch_keeps_running_after_a_sibling_fails(
+    db_connection: aiosqlite.Connection,
+) -> None:
+    """The whole point of Step 7: one branch failing must not stop an
+    unrelated, independent branch from completing -- only steps that
+    actually depend on the failure should be affected."""
+    workflow = Workflow(
+        id="w1",
+        name="wf",
+        steps=[
+            _step("fails"),
+            _step("blocked", depends_on=["fails"]),
+            _step("independent"),
+        ],
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    repo = WorkflowRepository(db_connection)
+    await repo.create_workflow(workflow)
+
+    class _PerStepClient:
+        async def send_message(self, message: str) -> AgentChatResult:
+            if "do fails" in message:
+                raise AgentCallError("boom")
+            return _result(text="ok")
+
+    final = await run_workflow(_PerStepClient(), repo, workflow)
+
+    by_id = {s.id: s for s in final.steps}
+    assert by_id["fails"].status == "failed"
+    assert by_id["blocked"].status == "pending"  # never became eligible
+    assert by_id["independent"].status == "succeeded"  # ran anyway
+    assert final.status == "failed"  # any failure fails the whole workflow
+
+
+async def test_run_workflow_raises_on_a_cyclic_workflow(
+    db_connection: aiosqlite.Connection,
+) -> None:
+    workflow = Workflow(
+        id="w1",
+        name="wf",
+        steps=[_step("a", depends_on=["b"]), _step("b", depends_on=["a"])],
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    repo = WorkflowRepository(db_connection)
+    await repo.create_workflow(workflow)
+
+    with pytest.raises(DependencyCycleError):
+        await run_workflow(_ScriptedClient([]), repo, workflow)

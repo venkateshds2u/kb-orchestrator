@@ -9,6 +9,7 @@ check `step.status`/`depends_on` itself; that's this module's other half's
 job, not something to re-litigate at the single-step layer.
 """
 
+import asyncio
 from datetime import UTC, datetime
 
 from kb_orchestrator.agent_client import AgentCallError, AgentClient
@@ -99,13 +100,43 @@ def _compose_message(step: Step, completed: dict[str, Step]) -> str:
     return f"Context from previous steps:\n{context}\n\nTask: {step.message}"
 
 
+async def _run_ready_step(
+    client: AgentClient,
+    repository: WorkflowRepository,
+    workflow_id: str,
+    step: Step,
+    completed: dict[str, Step],
+) -> Step:
+    """Run one step that's already known to be ready (all its
+    dependencies are in `completed`), persisting both the `running`
+    transition and the final outcome."""
+    message = _compose_message(step, completed)
+    await repository.update_step(
+        workflow_id, step.id, status="running", updated_at=datetime.now(UTC)
+    )
+
+    result_step = await execute_step(client, step.model_copy(update={"message": message}))
+    await repository.update_step(
+        workflow_id,
+        step.id,
+        status=result_step.status,
+        result=result_step.result,
+        error=result_step.error,
+        updated_at=result_step.updated_at,
+    )
+    return result_step
+
+
 async def run_workflow(
     client: AgentClient, repository: WorkflowRepository, workflow: Workflow
 ) -> Workflow:
-    """Execute every eligible step in `workflow`, in dependency order,
-    one at a time -- persisting each transition via `repository` as it
-    goes, so progress survives a crash mid-run (the reason Step 4's
-    persistence exists at all).
+    """Execute `workflow` wave by wave: every step whose dependencies are
+    already satisfied runs *concurrently* with its wave-mates, persisting
+    each transition via `repository` as it goes, so progress survives a
+    crash mid-run (the reason Step 4's persistence exists at all). A
+    linear chain (Step 6's own scope) is just the special case where every
+    wave happens to contain exactly one step -- this is a strict
+    generalization of Step 6's runner, not a parallel alternative to it.
 
     Resumable: a step already `succeeded` (from a prior, interrupted run
     of this same workflow) is skipped, its existing result reused as
@@ -113,41 +144,52 @@ async def run_workflow(
     already `failed` is returned untouched -- deciding whether/how to
     retry a failed step is Step 8's job, not this function's.
 
-    Stops entirely on the first failure. Correct for what Step 6 actually
-    builds -- a single linear chain, where every later step already
-    depends, transitively, on every earlier one, so nothing independent
-    is left to keep running anyway. Step 7 (real parallel branches)
-    revisits this: stopping *everything* because one independent branch
-    failed would then be too broad.
+    A step failing blocks only *its own* downstream dependents (they can
+    never satisfy "all dependencies completed", so they stay `pending`
+    forever) -- not unrelated, independent branches, which keep running to
+    completion. This is the behavior Step 6 explicitly named as needing
+    revisiting once real parallel branches existed: stopping *everything*
+    because one independent branch failed would be too broad now that
+    "everything" isn't necessarily one chain.
     """
     if workflow.status == "failed":
         return workflow
 
-    ordered = topological_order(workflow.steps)
+    # Called only for its cycle-detection side effect -- the wave loop
+    # below computes its own execution order from readiness directly, but
+    # a cyclic workflow definition should fail loudly right here, not
+    # silently sit as "pending forever" once no wave ever becomes ready.
+    topological_order(workflow.steps)
+
     completed: dict[str, Step] = {s.id: s for s in workflow.steps if s.status == "succeeded"}
+    failed_ids: set[str] = set()
+    remaining = [s for s in workflow.steps if s.id not in completed]
 
-    for step in ordered:
-        if step.id in completed:
-            continue
+    while remaining:
+        # Ready now: every dependency already succeeded, and none failed
+        # (a failed dependency means this step can never become ready --
+        # not "not yet", but "not ever" -- so it's left out of every
+        # future wave rather than retried against a stale `completed`).
+        ready = [
+            step
+            for step in remaining
+            if all(dep in completed for dep in step.depends_on)
+            and not any(dep in failed_ids for dep in step.depends_on)
+        ]
+        if not ready:
+            break  # everything left is permanently blocked by a failure
 
-        message = _compose_message(step, completed)
-        await repository.update_step(
-            workflow.id, step.id, status="running", updated_at=datetime.now(UTC)
+        results = await asyncio.gather(
+            *(_run_ready_step(client, repository, workflow.id, step, completed) for step in ready)
         )
+        for result_step in results:
+            if result_step.status == "succeeded":
+                completed[result_step.id] = result_step
+            else:
+                failed_ids.add(result_step.id)
 
-        result_step = await execute_step(client, step.model_copy(update={"message": message}))
-        await repository.update_step(
-            workflow.id,
-            step.id,
-            status=result_step.status,
-            result=result_step.result,
-            error=result_step.error,
-            updated_at=result_step.updated_at,
-        )
-        completed[step.id] = result_step
-
-        if result_step.status == "failed":
-            break
+        ready_ids = {step.id for step in ready}
+        remaining = [step for step in remaining if step.id not in ready_ids]
 
     refreshed = await repository.get_workflow(workflow.id)
     assert refreshed is not None, "workflow was read at the top of this call; it cannot vanish"

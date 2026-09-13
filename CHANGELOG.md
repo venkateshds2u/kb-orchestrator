@@ -5,6 +5,34 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Step 7 — Parallel/fan-out execution
+- `run_workflow` rewritten around a wave-based loop: every step whose
+  dependencies are already satisfied runs *concurrently* with its
+  wave-mates (`asyncio.gather`), not one at a time. A linear chain is
+  simply the special case where every wave contains exactly one step --
+  this is a strict generalization of Step 6's runner (all 5 of Step 6's
+  own tests kept passing unchanged against the new implementation, not
+  rewritten to match it).
+- A step failing now blocks only its *own* downstream dependents (they
+  can never satisfy "all dependencies completed," so they stay `pending`
+  forever) -- not unrelated, independent branches, which keep running to
+  completion. This directly replaces Step 6's "stop entirely on first
+  failure," which that step explicitly flagged as needing revisiting once
+  real parallel branches existed.
+- `topological_order()` is still called once at the top of `run_workflow`
+  -- now purely for its cycle-detection side effect (the wave loop
+  computes its own execution order from live readiness, not from that
+  function's returned list), so a cyclic workflow definition still fails
+  loudly and immediately rather than silently sitting as "pending
+  forever" once no wave ever becomes ready.
+- 4 new tests: independent steps proven to run *concurrently* (an
+  in-flight counter with no lock needed, since the increment/check has no
+  `await` between them and can't be interleaved), a fan-in step's message
+  correctly includes both of two independent dependencies' results, an
+  independent branch completing after an unrelated sibling fails (the
+  actual point of this step), and cycle detection still raising through
+  the new implementation.
+
 ### Step 6 — Sequential multi-step workflows
 - `execution.py` gains `topological_order()` (Kahn's algorithm; ties
   resolve in original list order) and `DependencyCycleError` -- closing
