@@ -5,6 +5,55 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Step 5 — Single-step execution
+- `agent_client.py`: `AgentClient` (a `Protocol`, same interface-
+  segregation pattern as Project 2's `ToolProvider`), `HttpAgentClient`
+  (the real implementation, over `httpx.AsyncClient`), and this app's own
+  wire-facing pydantic models (`AgentChatResult`, `AgentToolCall`,
+  `AgentExecutionFailure`) mirroring kb-agent's `ChatResponseBody` --
+  not a reuse of kb-agent's actual classes across the package boundary,
+  since the only real contract between these two apps is the HTTP wire
+  format, not shared Python types.
+- No `history` parameter on `send_message`: every call is a fresh,
+  standalone request. Chaining context between workflow steps (Step 6)
+  happens by composing a step's `message` text to include a prior step's
+  result, not by threading kb-agent's own multi-turn conversation state
+  across calls representing different *roles*, not turns in one chat.
+- Hand-rolled SSE parsing (`_iter_sse`) matching kb-agent's own
+  `_format_sse` encoding exactly. `AgentCallError` covers everything that
+  means the HTTP call itself didn't work (connection failure, non-2xx,
+  an `error` SSE event, a stream ending with no `done` event) -- distinct
+  from `AgentChatResult.execution_failure`, a *successful* call whose body
+  reports kb-agent's own tool execution failed.
+- `execution.py`: `execute_step(client, step) -> Step` -- pure with
+  respect to persistence (no repository call in here); returns a new
+  `Step` reflecting the outcome, leaving the original untouched (frozen,
+  Step 3). Doesn't check `step.status`/`depends_on` itself -- deciding
+  which steps are eligible to run is Step 6's execution engine's job, not
+  something to re-litigate at this layer.
+- A response with real `text` but `hit_iteration_limit`/`hit_token_budget`
+  set (kb-agent's own graceful wrap-up, Project 2 Step 8) still counts as
+  the step succeeding -- a usable answer arrived, just possibly a less
+  complete one; nothing downstream needs a finer-grained distinction yet.
+- Tested at the right boundary for what's actually available: unit tests
+  for `execute_step` use a fake `AgentClient` (no HTTP at all);
+  `HttpAgentClient`'s own tests use `httpx.MockTransport` (a real httpx
+  testing utility) to fake the transport while exercising real request
+  building and real SSE-parsing code. Neither a real kb-agent process nor
+  an import of its Python internals was an option: the former needs a
+  real, billed Anthropic API key (this project's inherited standing
+  choice); the latter would violate the HTTP-only boundary Step 0
+  deliberately drew between these two packages.
+- **Additionally verified for real, once, outside the committed test
+  suite**: a throwaway script spun up an actual kb-agent HTTP server
+  (real MCP connection, mocked LLM -- kb-agent's own established test
+  pattern) and hit it with this project's real `HttpAgentClient`, proving
+  the hand-written SSE parser matches kb-agent's *actual* wire format, not
+  just a hand-crafted guess at it from reading its source. Script deleted
+  after use, consistent with Project 2's own Step 13 precedent of not
+  leaving throwaway verification scripts behind.
+- 20 new tests across `test_agent_client.py` and `test_execution.py`.
+
 ### Step 4 — SQLite-backed workflow persistence
 - `config.py`: `db_path: Path` (default `./data/workflows.sqlite3`), same
   shape as kb-mcp-server's own `db_path` -- not validated for existence,

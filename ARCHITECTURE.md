@@ -33,6 +33,74 @@ lives entirely on the other side of that boundary.
 
 ## Decisions log
 
+### Step 5 — Single-step execution
+- **No `history` parameter on `AgentClient.send_message` -- resolved, not
+  deferred.** Step 0 flagged this as an open question. The answer: a
+  workflow's steps are different *roles* ("research", "draft"), not turns
+  in one continuous conversation with one persona, so reusing kb-agent's
+  multi-turn `history` mechanism across them would be a category error --
+  a "conversation" that jumps between unrelated personas isn't a
+  conversation. Context instead flows by a future step's `message` text
+  being composed (Step 6) to explicitly include a prior step's `result`.
+  Every `send_message` call is a fresh, stateless request.
+- **This app defines its own wire-facing pydantic models
+  (`AgentChatResult` etc.), not a reuse of kb-agent's `ChatResponseBody`
+  across the package boundary.** The two packages' only real contract is
+  the HTTP/JSON wire format kb-agent's Step 11 defined -- depending on its
+  actual Python classes would mean importing kb-agent's code, which Step
+  0 deliberately ruled out (these apps talk over HTTP only). Two field-
+  compatible pydantic models on either side of one wire contract is the
+  correct amount of coupling; sharing one Python class across a process/
+  package boundary that only ever communicates over a network is not.
+- **`AgentCallError` (the HTTP call broke) and
+  `AgentChatResult.execution_failure` (a successful call reporting kb-
+  agent's own tool failure) are two distinct failure categories, handled
+  as two separate cases in `execute_step` -- mirroring the exact
+  distinction Project 2 drew inside its own agent loop (a raised exception
+  from `call_tool` vs. a tool's own `is_error=True`).** Both currently
+  produce the same *outcome* on a `Step` (`status="failed"`, `error` set)
+  -- there's no present reason for a workflow to react differently to
+  "kb-agent is unreachable" versus "kb-agent's own tool call failed" -- but
+  keeping them as genuinely distinct exception/data shapes internally means
+  Step 8's retry logic can later choose to treat them differently (e.g.
+  retry a transient `AgentCallError` more readily than a `execution_failure`
+  that already represents kb-agent's own considered failure) without
+  restructuring anything built now.
+- **`execute_step` is pure with respect to persistence -- no repository
+  dependency, no I/O beyond the one HTTP call.** Considered folding
+  persistence in directly (mark "running" before calling, persist the
+  result after), but that conflates two concerns this step doesn't need
+  conflated yet: *what happens when one step runs* (this step's whole
+  job) versus *when and in what order steps get chosen to run, and how
+  that gets persisted* (Step 6's actual job, iterating a whole workflow
+  graph). Building the second prematurely, before the execution engine
+  that would actually drive it exists, would mean guessing at an
+  interface Step 6 hasn't earned yet.
+- **A response with real `text` but `hit_iteration_limit`/
+  `hit_token_budget` set still counts as `succeeded`, not a distinct
+  partial-success status.** kb-agent's own graceful-stop design (its
+  Step 8) already guarantees a coherent answer even when it hit a policy
+  limit -- from this workflow step's point of view, a usable result
+  arrived. Introducing a finer-grained "succeeded, but limited" status now
+  would be speculative: nothing downstream reads that distinction yet, and
+  `Step.result` already carries whatever text kb-agent actually returned.
+- **Verification strategy chosen by what's actually available, not by
+  default habit.** Three options existed for testing `HttpAgentClient`:
+  spawn a real kb-agent subprocess (needs a real, billed Anthropic API
+  key -- ruled out by this project's inherited Step 5 standing choice from
+  Project 2), import kb-agent's Python internals directly to construct a
+  mocked-LLM test harness in-process (would violate the HTTP-only
+  boundary Step 0 deliberately drew between these packages), or mock at
+  the transport level with `httpx.MockTransport` (keeps kb-orchestrator's
+  test suite fully self-contained, while still exercising real request
+  construction and real SSE-parsing code). The third was chosen for the
+  committed test suite -- but specifically *because* it only proves this
+  app's parsing matches a hand-crafted example of kb-agent's format, a
+  one-time throwaway script (deleted after use) crossed the import
+  boundary just long enough to prove that parsing also matches kb-agent's
+  *actual* wire output, the same "throwaway verification, not a permanent
+  dependency" pattern Project 2's own Step 13 walkthrough used.
+
 ### Step 4 — SQLite-backed workflow persistence
 - **`WorkflowRepository` works directly with domain `Workflow`/`Step`,
   not a parallel `WorkflowRecord`/`StepRecord` hierarchy -- a deliberate
