@@ -9,8 +9,8 @@ workflow library (Temporal, Prefect, ...) — same reasoning as Projects 1
 and 2's choice to hand-roll rather than use a framework: the mechanics are
 the point.
 
-Status: **under construction** — this README grows as the project does. See
-`ARCHITECTURE.md` for design decisions and `CHANGELOG.md` for what's landed so far.
+Status: **complete** — all 14 planned steps shipped. See `ARCHITECTURE.md`
+for design decisions and `CHANGELOG.md` for what landed at each step.
 
 ## Prerequisites
 

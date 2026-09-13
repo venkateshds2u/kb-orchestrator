@@ -33,6 +33,30 @@ lives entirely on the other side of that boundary.
 
 ## Decisions log
 
+### Step 13 — End-to-end walkthrough
+- **Verification pass, not a deliverable -- no new artifact committed,**
+  matching both prior projects' own final steps exactly (neither left a
+  walkthrough script or document behind either).
+- **Stayed mocked at the LLM boundary even at the very last step, across
+  all three projects at once.** This is the first time the whole system
+  ran together, and it would have been the natural moment to finally
+  spend real API budget proving it end to end with a live model. The
+  standing choice from kb-agent's own Step 5 held anyway: every other
+  layer -- a real kb-mcp-server subprocess, real MCP tool execution, a
+  real kb-agent HTTP server, a real kb-orchestrator HTTP server, a real
+  SQLite repository, dependency ordering, human-in-the-loop pause/resume,
+  structured logging -- ran for real; only the literal call to
+  api.anthropic.com stayed synthetic.
+- **Driven entirely through kb-orchestrator's own HTTP API, not by
+  calling `run_workflow`/`WorkflowService` directly in the same
+  process.** This is a deliberately stronger claim than the unit/
+  integration tests already make: it proves the actual deployed shape
+  (three separate HTTP servers, real sockets, real JSON over the wire)
+  works, not just that the underlying Python functions compose correctly
+  when called directly. Steps 4-11 were each verified in isolation as
+  they were built; this step is what proves the composition of all of
+  them holds.
+
 ### Step 12 — Docker
 - **A standard single-project image, not a two-project bundle like
   kb-agent's own -- a direct, structural consequence of Step 0's design,

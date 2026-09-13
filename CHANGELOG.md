@@ -5,6 +5,31 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Step 13 — End-to-end walkthrough
+- No new shipped code -- this step ran the whole three-project system
+  live and confirmed it actually holds together, the same verification-
+  pass shape as both Projects 1 and 2's own final steps (neither left a
+  walkthrough artifact behind either).
+- A throwaway script (deleted after use, never committed) stood up all
+  three projects together for the first time in this curriculum: a real
+  kb-mcp-server subprocess, a real kb-agent HTTP server (mocked LLM,
+  matching kb-agent's own established test pattern -- this project's
+  standing choice to avoid a real, billed Anthropic API call held all the
+  way to the end), and a real kb-orchestrator HTTP server pointed at it
+  with a real `HttpAgentClient` and a real SQLite repository.
+- Drove a full workflow lifecycle purely through real HTTP calls to
+  kb-orchestrator -- no in-process test transport, no direct Python
+  access to any internal function: create a two-step workflow
+  (`research` → `draft`, `draft` requiring approval) → `POST /run`
+  (executes `research` for real against kb-mcp-server via kb-agent,
+  pauses on `draft`) → `POST .../approve` → `POST /run` again (resumes,
+  `draft` actually runs, workflow succeeds). Every layer built across
+  Steps 0-12 participated for real: dependency ordering, real tool
+  execution, human-in-the-loop pause/resume, structured logging with
+  correlation ids visible in the captured output.
+- Project 3 (kb-orchestrator) is now complete: all 14 planned steps
+  (0-13) shipped, tested, and documented.
+
 ### Step 12 — Docker
 - New `Dockerfile`, `docker-compose.yml`, `.dockerignore`: a standard
   single-project multi-stage build -- unlike kb-agent's own Dockerfile,
