@@ -33,6 +33,54 @@ lives entirely on the other side of that boundary.
 
 ## Decisions log
 
+### Step 6 — Sequential multi-step workflows
+- **Context chains between steps by prepending a plain-text block, not a
+  template language.** Considered a `{{placeholder}}` substitution scheme
+  (more flexible -- a step could reference a dependency's result anywhere
+  in its own message, not just at the start) and rejected it for now:
+  nothing in this curriculum's actual scenarios needs mid-message
+  splicing, and building a parser (escaping rules, missing-placeholder
+  errors, etc.) for a need that doesn't exist yet is exactly the
+  speculative machinery this project's principles rule out. Prepending
+  `[name]: result` blocks ahead of the step's own task text is the
+  simplest thing that makes a later step aware of an earlier one's
+  answer, and it required zero new parsing code.
+- **The composed message is never persisted -- `Step.message` stays the
+  original, human-authored text.** `WorkflowRepository.update_step` only
+  ever touches `status`/`result`/`error`/`updated_at`; it has no
+  `message`-updating path, and that absence is deliberate, not an
+  oversight: a workflow's definition (what each step was *asked* to do)
+  is more meaningful on later inspection than an ephemeral, fully-expanded
+  prompt reconstructible from the workflow's own steps and results at any
+  time. Capturing exactly what was sent, for real observability, is
+  Step 10's job if it turns out to matter.
+- **`run_workflow` is resumable by construction, not as an afterthought.**
+  A step already `succeeded` is skipped and its stored result folded
+  into context for later steps -- built now specifically because Step 4's
+  whole justification for persisting workflow state (surviving a process
+  crash) is hollow until something actually resumes from it. Without this,
+  Step 4 would have shipped a write-only audit log with no real use yet.
+- **Stops entirely on the first failure -- a scope-specific
+  simplification for *this* step, named explicitly as one to revisit, not
+  a permanent design.** Every workflow `run_workflow` can execute right
+  now is a single linear chain (Step 6's own scope) -- every step depends,
+  directly or transitively, on every step before it, so a failure
+  anywhere always blocks everything after it; "stop entirely" and "stop
+  only the affected branch" are the same behavior in a chain with no
+  branches. Step 7 introduces independent parallel steps, where those two
+  behaviors genuinely diverge -- that's the point where this decision
+  gets revisited, mirroring exactly how Project 2's Step 6 flagged its own
+  hard-stop-vs-graceful-stop tradeoff for Step 8 to resolve later rather
+  than solving it prematurely here.
+- **Cycle detection lives in `topological_order`, not back-ported into
+  Step 3's domain model.** Both Steps 3 and 4 explicitly flagged this gap
+  and deferred it to "whichever layer actually needs a real execution
+  order" -- that's this one. Kahn's algorithm computes the order *and*
+  detects a cycle as the same side effect (nodes that never reach
+  zero remaining dependencies), so there was no reason to write a
+  separate cycle-only check first and a separate ordering algorithm
+  second.
+
 ### Step 5 — Single-step execution
 - **No `history` parameter on `AgentClient.send_message` -- resolved, not
   deferred.** Step 0 flagged this as an open question. The answer: a

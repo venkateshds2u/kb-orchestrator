@@ -5,6 +5,33 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Step 6 — Sequential multi-step workflows
+- `execution.py` gains `topological_order()` (Kahn's algorithm; ties
+  resolve in original list order) and `DependencyCycleError` -- closing
+  the cycle-detection gap Steps 3/4 explicitly deferred here, since this
+  is the layer that actually needs a real execution order to exist.
+- `_compose_message()`: a later step's message is its own text, prefixed
+  with every completed dependency's result under a `[step name]: result`
+  heading -- no template/placeholder syntax, since nothing yet needs a
+  dependency's result spliced into the *middle* of a step's own message.
+- `run_workflow(client, repository, workflow) -> Workflow`: executes
+  every eligible step in dependency order, one at a time, persisting each
+  transition via the repository as it goes. **Resumable**: a step already
+  `succeeded` (from a prior, interrupted run of the same workflow) is
+  skipped, its stored result reused as context for whatever depends on
+  it -- Step 4's persistence finally has a real payoff, not just a
+  write-only log. A workflow already `failed` is returned untouched;
+  retrying is Step 8's job. Stops entirely on the first new failure --
+  correct for the linear chains this step builds (every later step
+  already depends, transitively, on every earlier one), revisited once
+  Step 7 adds real independent branches.
+- 15 new tests: `topological_order` (linear chain, diamond dependencies,
+  tie-order stability, cycle detection) and `run_workflow` (dependency
+  order, message composition, stop-on-failure leaving later steps
+  `pending`, resuming a partially-completed workflow, no-op on an
+  already-failed workflow) -- the last three using a real in-memory
+  repository, not a fake, same pattern as Steps 4/5.
+
 ### Step 5 — Single-step execution
 - `agent_client.py`: `AgentClient` (a `Protocol`, same interface-
   segregation pattern as Project 2's `ToolProvider`), `HttpAgentClient`

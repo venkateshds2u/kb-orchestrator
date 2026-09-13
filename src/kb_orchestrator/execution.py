@@ -1,18 +1,19 @@
-"""Step execution: running one `Step` against an `AgentClient`.
+"""Step execution: running one `Step` (Step 5) or a whole `Workflow`
+(Step 6) against an `AgentClient`.
 
 `execute_step` is deliberately pure with respect to persistence -- it
-takes a `Step`, returns an updated `Step`, and touches no repository. Step
-6's execution engine (iterating a whole workflow, persisting each
-transition) is what actually calls this and decides when a step is
-eligible to run; this function doesn't check `step.status` or
-`depends_on` itself; that's the caller's job, not something to re-litigate
-here.
+takes a `Step`, returns an updated `Step`, and touches no repository.
+`run_workflow` is what actually decides which steps are eligible to run,
+in what order, and persists each transition -- `execute_step` doesn't
+check `step.status`/`depends_on` itself; that's this module's other half's
+job, not something to re-litigate at the single-step layer.
 """
 
 from datetime import UTC, datetime
 
 from kb_orchestrator.agent_client import AgentCallError, AgentClient
-from kb_orchestrator.domain.models import Step
+from kb_orchestrator.db.repository import WorkflowRepository
+from kb_orchestrator.domain.models import Step, Workflow
 
 
 async def execute_step(client: AgentClient, step: Step) -> Step:
@@ -37,3 +38,117 @@ async def execute_step(client: AgentClient, step: Step) -> Step:
         )
 
     return step.model_copy(update={"status": "succeeded", "result": result.text, "updated_at": now})
+
+
+class DependencyCycleError(Exception):
+    """No valid execution order exists -- some steps depend on each other
+    in a cycle. Step 3 only ever checked for self-dependency and
+    references to real steps; a longer cycle (A depends on B depends on
+    A) slips past both those checks, which is exactly why that gap was
+    flagged there as this layer's job to close, not left unaddressed."""
+
+
+def topological_order(steps: list[Step]) -> list[Step]:
+    """Order `steps` so every step appears after everything it
+    `depends_on` -- Kahn's algorithm. Ties (steps that become eligible at
+    the same time) resolve in the original list order, so a plain linear
+    chain or an already-ordered list comes back unchanged.
+    """
+    by_id = {step.id: step for step in steps}
+    remaining_deps = {step.id: len(step.depends_on) for step in steps}
+    dependents: dict[str, list[str]] = {step.id: [] for step in steps}
+    for step in steps:
+        for dep_id in step.depends_on:
+            dependents[dep_id].append(step.id)
+
+    ready = [step.id for step in steps if remaining_deps[step.id] == 0]
+    order: list[str] = []
+    while ready:
+        current = ready.pop(0)
+        order.append(current)
+        for dependent_id in dependents[current]:
+            remaining_deps[dependent_id] -= 1
+            if remaining_deps[dependent_id] == 0:
+                ready.append(dependent_id)
+
+    if len(order) != len(steps):
+        cyclic = sorted(set(by_id) - set(order))
+        raise DependencyCycleError(f"cycle detected among step(s): {cyclic}")
+
+    return [by_id[step_id] for step_id in order]
+
+
+def _compose_message(step: Step, completed: dict[str, Step]) -> str:
+    """Build the message actually sent to kb-agent for `step`: its own
+    `message`, prefixed with every completed dependency's result.
+
+    Not a template language (no `{{placeholder}}` syntax) -- every
+    dependency's result is simply prepended, in `depends_on` order,
+    ahead of the step's own task text. Deliberately the simplest thing
+    that lets a later step build on an earlier one's answer: nothing yet
+    needs a dependency's result spliced into the *middle* of a step's own
+    message, so there's no reason to build a parser for that.
+    """
+    if not step.depends_on:
+        return step.message
+
+    context = "\n\n".join(
+        f"[{completed[dep_id].name}]: {completed[dep_id].result or '(no result)'}"
+        for dep_id in step.depends_on
+    )
+    return f"Context from previous steps:\n{context}\n\nTask: {step.message}"
+
+
+async def run_workflow(
+    client: AgentClient, repository: WorkflowRepository, workflow: Workflow
+) -> Workflow:
+    """Execute every eligible step in `workflow`, in dependency order,
+    one at a time -- persisting each transition via `repository` as it
+    goes, so progress survives a crash mid-run (the reason Step 4's
+    persistence exists at all).
+
+    Resumable: a step already `succeeded` (from a prior, interrupted run
+    of this same workflow) is skipped, its existing result reused as
+    context for whatever depends on it, rather than re-run. A workflow
+    already `failed` is returned untouched -- deciding whether/how to
+    retry a failed step is Step 8's job, not this function's.
+
+    Stops entirely on the first failure. Correct for what Step 6 actually
+    builds -- a single linear chain, where every later step already
+    depends, transitively, on every earlier one, so nothing independent
+    is left to keep running anyway. Step 7 (real parallel branches)
+    revisits this: stopping *everything* because one independent branch
+    failed would then be too broad.
+    """
+    if workflow.status == "failed":
+        return workflow
+
+    ordered = topological_order(workflow.steps)
+    completed: dict[str, Step] = {s.id: s for s in workflow.steps if s.status == "succeeded"}
+
+    for step in ordered:
+        if step.id in completed:
+            continue
+
+        message = _compose_message(step, completed)
+        await repository.update_step(
+            workflow.id, step.id, status="running", updated_at=datetime.now(UTC)
+        )
+
+        result_step = await execute_step(client, step.model_copy(update={"message": message}))
+        await repository.update_step(
+            workflow.id,
+            step.id,
+            status=result_step.status,
+            result=result_step.result,
+            error=result_step.error,
+            updated_at=result_step.updated_at,
+        )
+        completed[step.id] = result_step
+
+        if result_step.status == "failed":
+            break
+
+    refreshed = await repository.get_workflow(workflow.id)
+    assert refreshed is not None, "workflow was read at the top of this call; it cannot vanish"
+    return refreshed
