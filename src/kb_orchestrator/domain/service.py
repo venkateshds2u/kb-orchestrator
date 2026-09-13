@@ -10,6 +10,7 @@ no real database involved.
 from datetime import UTC, datetime
 from uuid import uuid4
 
+import structlog
 from pydantic import BaseModel, ConfigDict, Field
 
 from kb_orchestrator.db.repository import WorkflowRepository
@@ -19,6 +20,8 @@ from kb_orchestrator.domain.errors import (
     WorkflowNotFoundError,
 )
 from kb_orchestrator.domain.models import Step, Workflow
+
+logger = structlog.get_logger(__name__)
 
 
 class StepSpec(BaseModel):
@@ -59,6 +62,7 @@ class WorkflowService:
         # own validators -- loudly, before anything ever reaches SQL.
         workflow = Workflow(id=str(uuid4()), name=name, steps=steps, created_at=now, updated_at=now)
         await self._repository.create_workflow(workflow)
+        logger.info("workflow_created", workflow_id=workflow.id, name=name, step_count=len(steps))
         return workflow
 
     async def get_workflow(self, workflow_id: str) -> Workflow:
@@ -82,6 +86,7 @@ class WorkflowService:
             result=step.result,
             updated_at=datetime.now(UTC),
         )
+        logger.info("step_approved", workflow_id=workflow_id, step_id=step_id)
         return await self.get_workflow(workflow_id)
 
     async def reject_step(self, workflow_id: str, step_id: str, *, reason: str) -> Workflow:
@@ -102,6 +107,7 @@ class WorkflowService:
             error=reason,
             updated_at=datetime.now(UTC),
         )
+        logger.info("step_rejected", workflow_id=workflow_id, step_id=step_id, reason=reason)
         return await self.get_workflow(workflow_id)
 
 

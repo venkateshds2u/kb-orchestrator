@@ -33,6 +33,61 @@ lives entirely on the other side of that boundary.
 
 ## Decisions log
 
+### Step 10 — Observability
+- **`structlog.contextvars`, not OpenTelemetry or any other tracing
+  library -- named explicitly as the real alternative, not built.**
+  OpenTelemetry is the standard, production-grade answer to distributed
+  tracing (spans, exporters, the W3C `traceparent` propagation format),
+  and would be a legitimate, realistic choice for a production version of
+  this system. It was set aside here for the same reason this curriculum
+  hand-rolls the workflow engine itself (Step 0) and Project 2 hand-rolls
+  its agent loop instead of using the Claude Agent SDK: the mechanics are
+  the point, and OpenTelemetry's real value (a full span/exporter/
+  collector pipeline) isn't earned by a project this size. `structlog`
+  was already the logging tool everywhere in this curriculum, and its
+  `contextvars` module already had a processor wired into every
+  project's `logging.py` since Step 2 -- correlation IDs are a genuinely
+  free extension of infrastructure that already existed, not a new
+  dependency.
+- **Correlation flows through ambient context (`bound_contextvars`), not
+  explicit parameters threaded through every function signature.**
+  Considered explicitly: passing `workflow_id`/`step_id` as parameters to
+  `execute_step`, `AgentClient.send_message`, and every test double
+  implementing that Protocol would make the data flow more visible at
+  each call site, but at real cost -- every existing fake `AgentClient` in
+  the test suite would need updating for a value most callers don't
+  actually need to *use*, only pass through. Binding it once at the top
+  of the relevant scope and letting structlog's `merge_contextvars`
+  processor pick it up automatically is exactly the intended use of that
+  mechanism, and kept `AgentClient`'s Protocol and every existing test
+  double completely unchanged.
+- **Verified concurrent isolation empirically before relying on it for
+  genuinely parallel steps -- twice.** First with a standalone throwaway
+  script proving `asyncio.gather` gives each task its own copy of bound
+  context (a sibling's `step_id` never leaks across), then again through
+  this app's actual logging pipeline in a real test, asserting on real
+  JSON-rendered log lines from two concurrently-running steps. The
+  abstract mechanism working in isolation and this app's actual usage of
+  it working are different claims; both were checked, not one assumed
+  from the other.
+- **kb-agent receives correlation headers it doesn't consume yet --
+  named as a real, acknowledged gap, not solved end-to-end.** Sending
+  `X-Workflow-Id`/`X-Step-Id` costs nothing and is forward-compatible:
+  if kb-agent's own logging is ever extended to read and log incoming
+  headers, these would already be arriving correctly-populated with zero
+  changes needed on kb-orchestrator's side. Actually wiring kb-agent to
+  read and correlate on them is out of reach from this project alone --
+  Project 2 is a separate, already-complete project, and reaching into it
+  now would cross a boundary this whole curriculum has kept deliberately
+  intact between projects worked on strictly one at a time.
+- **Reading headers from ambient structlog context inside
+  `HttpAgentClient`, rather than passing `workflow_id`/`step_id` as
+  explicit arguments to `send_message`, for exactly the same reason as
+  the contextvars decision above.** This keeps the header-propagation
+  feature and the logging-correlation feature sharing one mechanism
+  instead of inventing a second, parallel way to carry the same two
+  values through the same call chain.
+
 ### Step 9 — Human-in-the-loop
 - **Approval gates *success*, not *starting* the step.** Two readings of
   "requires approval" were possible: a human signs off before the step

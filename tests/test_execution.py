@@ -12,6 +12,7 @@ actually needs it" pattern as Steps 4/5's own tests.
 """
 
 import asyncio
+import json
 from datetime import UTC, datetime
 
 import aiosqlite
@@ -29,6 +30,7 @@ from kb_orchestrator.execution import (
     run_workflow,
     topological_order,
 )
+from kb_orchestrator.logging import configure_logging
 
 _NOW = datetime.now(UTC)
 
@@ -659,3 +661,55 @@ async def test_run_workflow_resumes_a_dependent_after_the_waiting_step_is_approv
     assert by_id["b"].status == "succeeded"
     assert by_id["b"].result == "b done"
     assert second_pass.status == "succeeded"
+
+
+# --- observability (Step 10) ------------------------------------------------
+
+
+async def test_run_workflow_logs_carry_workflow_and_step_correlation_ids(
+    db_connection: aiosqlite.Connection, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Proves the correlation actually shows up in real log output, not
+    just that `bound_contextvars` was called -- JSON rendering (production
+    mode) is what makes every field independently assertable here."""
+    configure_logging(Settings(**_REQUIRED, environment="production"))
+    workflow = Workflow(id="w1", name="wf", steps=[_step("a")], created_at=_NOW, updated_at=_NOW)
+    repo = WorkflowRepository(db_connection)
+    await repo.create_workflow(workflow)
+
+    await run_workflow(_ScriptedClient([_result(text="ok")]), repo, workflow, _settings())
+
+    events = [json.loads(line) for line in capsys.readouterr().out.strip().splitlines()]
+    step_succeeded = next(e for e in events if e["event"] == "step_succeeded")
+    workflow_completed = next(e for e in events if e["event"] == "workflow_run_completed")
+
+    assert step_succeeded["workflow_id"] == "w1"
+    assert step_succeeded["step_id"] == "a"
+    # The workflow-level event has no step_id -- it's outside any step's
+    # own bound_contextvars scope, proving that scope doesn't leak past
+    # the step it was bound for.
+    assert workflow_completed["workflow_id"] == "w1"
+    assert "step_id" not in workflow_completed
+
+
+async def test_run_workflow_concurrent_steps_dont_leak_each_others_step_id(
+    db_connection: aiosqlite.Connection, capsys: pytest.CaptureFixture[str]
+) -> None:
+    configure_logging(Settings(**_REQUIRED, environment="production"))
+    workflow = Workflow(
+        id="w1", name="wf", steps=[_step("a"), _step("b")], created_at=_NOW, updated_at=_NOW
+    )
+    repo = WorkflowRepository(db_connection)
+    await repo.create_workflow(workflow)
+    client = _ScriptedClient([_result(text="ok a"), _result(text="ok b")])
+
+    await run_workflow(client, repo, workflow, _settings())
+
+    events = [json.loads(line) for line in capsys.readouterr().out.strip().splitlines()]
+    succeeded = [e for e in events if e["event"] == "step_succeeded"]
+    assert {e["step_id"] for e in succeeded} == {"a", "b"}
+    # Each event has exactly one step_id -- neither run picked up the
+    # other's, confirming asyncio.gather's per-task context isolation
+    # holds for this app's own logging, not just the throwaway script
+    # that first verified it in the abstract.
+    assert all(e["step_id"] in ("a", "b") for e in succeeded)

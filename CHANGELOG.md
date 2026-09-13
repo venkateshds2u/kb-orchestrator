@@ -5,6 +5,40 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Step 10 — Observability
+- `execution.py`: `workflow_id` bound via `structlog.contextvars` for the
+  whole `run_workflow` call, `step_id` additionally bound within
+  `_run_ready_step` -- every log line emitted anywhere underneath
+  (including from other modules) automatically carries both, via the
+  `merge_contextvars` processor `logging.py` has had wired in since Step
+  2 but nothing used until now. New events: `workflow_run_started`,
+  `workflow_wave_started` (with the ready step ids), `workflow_run_completed`,
+  `workflow_run_skipped` (already-failed no-op), `step_attempt_started`,
+  `step_retrying`, `step_succeeded`, `step_failed`, `step_waiting_for_approval`.
+  `domain/service.py` gains `workflow_created`/`step_approved`/`step_rejected`.
+- Verified, not assumed, that this holds up under real concurrency:
+  a throwaway script confirmed `asyncio.gather`'s per-task context
+  isolation means one concurrently-running step's bound `step_id` never
+  leaks into a sibling's logs, while both still inherit the parent's
+  `workflow_id` -- then proved the same thing again through this app's
+  actual logging pipeline (JSON-rendered output, not just the abstract
+  mechanism) with two independent steps in one wave.
+- `agent_client.py`: `HttpAgentClient` now sends `X-Workflow-Id`/
+  `X-Step-Id` headers, read from whatever's already bound in the ambient
+  structlog context -- `AgentClient.send_message`'s signature is
+  unchanged, so no ripple through the Protocol or any test double. kb-agent
+  doesn't consume these headers today; sending them is forward-compatible
+  plumbing, not a claim of full cross-service trace correlation.
+- No OpenTelemetry (or any tracing library) added -- named explicitly as
+  the real production alternative, not built here, consistent with this
+  curriculum's standing choice to hand-roll mechanics (the workflow engine
+  itself, the agent loop in Project 2) rather than adopt a framework.
+- 5 new tests: correlation headers present/absent depending on bound
+  context, log output actually carrying `workflow_id`/`step_id` for both
+  a workflow-level and a step-level event (proving the scope boundary --
+  a workflow-level event has no `step_id`), and two concurrent steps'
+  logs never mixing up which `step_id` belongs to which.
+
 ### Step 9 — Human-in-the-loop
 - `domain/models.py`: `Step.requires_approval: bool = False`. A
   successful agent call on such a step becomes `waiting_for_approval`

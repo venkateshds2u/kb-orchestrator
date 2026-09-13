@@ -7,15 +7,31 @@ takes a `Step`, returns an updated `Step`, and touches no repository.
 in what order, and persists each transition -- `execute_step` doesn't
 check `step.status`/`depends_on` itself; that's this module's other half's
 job, not something to re-litigate at the single-step layer.
+
+Step 10 adds observability via `structlog.contextvars`, not a new
+tracing library: `workflow_id`/`step_id` are bound once per scope
+(`run_workflow`/`_run_ready_step`) and merged into every log line emitted
+underneath, including from other modules -- `logging.py`'s processor
+chain already had `merge_contextvars` wired in since Step 2, unused until
+now. Verified directly (not assumed) that this survives `asyncio.gather`
+correctly: each concurrently-running step gets its own copy of the bound
+context (so one step's `step_id` never leaks into a sibling running at
+the same time), while still inheriting whatever the parent already bound
+(`workflow_id`) -- confirmed with a throwaway script before relying on it
+for genuinely concurrent steps.
 """
 
 import asyncio
 from datetime import UTC, datetime
 
+import structlog
+
 from kb_orchestrator.agent_client import AgentCallError, AgentClient
 from kb_orchestrator.config import Settings
 from kb_orchestrator.db.repository import WorkflowRepository
 from kb_orchestrator.domain.models import Step, StepStatus, Workflow
+
+logger = structlog.get_logger(__name__)
 
 
 async def execute_step(client: AgentClient, step: Step) -> Step:
@@ -130,35 +146,48 @@ async def _run_ready_step(
     without restructuring anything; nothing yet demands that distinction,
     so retrying both uniformly is the correct amount of behavior for now.
     """
-    message = _compose_message(step, completed)
-    attempt_step = step.model_copy(update={"message": message})
+    with structlog.contextvars.bound_contextvars(step_id=step.id):
+        message = _compose_message(step, completed)
+        attempt_step = step.model_copy(update={"message": message})
 
-    result_step = step
-    attempt = 0
-    for attempt_number in range(1, settings.step_max_attempts + 1):
-        if attempt_number > 1:
-            backoff = settings.step_retry_backoff_seconds * (2 ** (attempt_number - 2))
-            await asyncio.sleep(backoff)
+        result_step = step
+        attempt = 0
+        for attempt_number in range(1, settings.step_max_attempts + 1):
+            if attempt_number > 1:
+                backoff = settings.step_retry_backoff_seconds * (2 ** (attempt_number - 2))
+                logger.warning(
+                    "step_retrying", attempt_number=attempt_number, backoff_seconds=backoff
+                )
+                await asyncio.sleep(backoff)
 
-        attempt = await repository.increment_attempt(workflow_id, step.id)
+            attempt = await repository.increment_attempt(workflow_id, step.id)
+            await repository.update_step(
+                workflow_id, step.id, status="running", updated_at=datetime.now(UTC)
+            )
+            logger.info("step_attempt_started", attempt=attempt)
+
+            result_step = await execute_step(client, attempt_step)
+            if result_step.status in ("succeeded", "waiting_for_approval"):
+                break  # both are terminal-for-this-attempt; neither is a failure to retry
+
+        final_step = result_step.model_copy(update={"attempt": attempt})
         await repository.update_step(
-            workflow_id, step.id, status="running", updated_at=datetime.now(UTC)
+            workflow_id,
+            step.id,
+            status=final_step.status,
+            result=final_step.result,
+            error=final_step.error,
+            updated_at=final_step.updated_at,
         )
 
-        result_step = await execute_step(client, attempt_step)
-        if result_step.status in ("succeeded", "waiting_for_approval"):
-            break  # both are terminal-for-this-attempt; neither is a failure to retry
+        if final_step.status == "failed":
+            logger.error("step_failed", attempt=attempt, error=final_step.error)
+        elif final_step.status == "waiting_for_approval":
+            logger.info("step_waiting_for_approval", attempt=attempt)
+        else:
+            logger.info("step_succeeded", attempt=attempt)
 
-    final_step = result_step.model_copy(update={"attempt": attempt})
-    await repository.update_step(
-        workflow_id,
-        step.id,
-        status=final_step.status,
-        result=final_step.result,
-        error=final_step.error,
-        updated_at=final_step.updated_at,
-    )
-    return final_step
+        return final_step
 
 
 async def run_workflow(
@@ -199,51 +228,59 @@ async def run_workflow(
     branches that don't depend on the waiting step keep running now,
     exactly the same reasoning as a failure not blocking unrelated work.
     """
-    if workflow.status == "failed":
-        return workflow
+    with structlog.contextvars.bound_contextvars(workflow_id=workflow.id):
+        if workflow.status == "failed":
+            logger.info("workflow_run_skipped", reason="already failed")
+            return workflow
 
-    # Called only for its cycle-detection side effect -- the wave loop
-    # below computes its own execution order from readiness directly, but
-    # a cyclic workflow definition should fail loudly right here, not
-    # silently sit as "pending forever" once no wave ever becomes ready.
-    topological_order(workflow.steps)
+        # Called only for its cycle-detection side effect -- the wave loop
+        # below computes its own execution order from readiness directly,
+        # but a cyclic workflow definition should fail loudly right here,
+        # not silently sit as "pending forever" once no wave ever becomes
+        # ready.
+        topological_order(workflow.steps)
 
-    completed: dict[str, Step] = {s.id: s for s in workflow.steps if s.status == "succeeded"}
-    failed_ids: set[str] = set()
-    waiting_ids: set[str] = {s.id for s in workflow.steps if s.status == "waiting_for_approval"}
-    remaining = [s for s in workflow.steps if s.id not in completed and s.id not in waiting_ids]
+        logger.info("workflow_run_started", step_count=len(workflow.steps))
 
-    while remaining:
-        # Ready now: every dependency already succeeded, and none failed
-        # or is still waiting on a human (either means this step can't
-        # run yet -- a failed dependency never will complete; a waiting
-        # one might, but not within this same call).
-        ready = [
-            step
-            for step in remaining
-            if all(dep in completed for dep in step.depends_on)
-            and not any(dep in failed_ids or dep in waiting_ids for dep in step.depends_on)
-        ]
-        if not ready:
-            break  # everything left is blocked by a failure or a pending approval
+        completed: dict[str, Step] = {s.id: s for s in workflow.steps if s.status == "succeeded"}
+        failed_ids: set[str] = set()
+        waiting_ids: set[str] = {s.id for s in workflow.steps if s.status == "waiting_for_approval"}
+        remaining = [s for s in workflow.steps if s.id not in completed and s.id not in waiting_ids]
 
-        results = await asyncio.gather(
-            *(
-                _run_ready_step(client, repository, workflow.id, step, completed, settings)
-                for step in ready
+        while remaining:
+            # Ready now: every dependency already succeeded, and none
+            # failed or is still waiting on a human (either means this
+            # step can't run yet -- a failed dependency never will
+            # complete; a waiting one might, but not within this same
+            # call).
+            ready = [
+                step
+                for step in remaining
+                if all(dep in completed for dep in step.depends_on)
+                and not any(dep in failed_ids or dep in waiting_ids for dep in step.depends_on)
+            ]
+            if not ready:
+                break  # everything left is blocked by a failure or a pending approval
+
+            logger.info("workflow_wave_started", step_ids=[step.id for step in ready])
+            results = await asyncio.gather(
+                *(
+                    _run_ready_step(client, repository, workflow.id, step, completed, settings)
+                    for step in ready
+                )
             )
-        )
-        for result_step in results:
-            if result_step.status == "succeeded":
-                completed[result_step.id] = result_step
-            elif result_step.status == "waiting_for_approval":
-                waiting_ids.add(result_step.id)
-            else:
-                failed_ids.add(result_step.id)
+            for result_step in results:
+                if result_step.status == "succeeded":
+                    completed[result_step.id] = result_step
+                elif result_step.status == "waiting_for_approval":
+                    waiting_ids.add(result_step.id)
+                else:
+                    failed_ids.add(result_step.id)
 
-        ready_ids = {step.id for step in ready}
-        remaining = [step for step in remaining if step.id not in ready_ids]
+            ready_ids = {step.id for step in ready}
+            remaining = [step for step in remaining if step.id not in ready_ids]
 
-    refreshed = await repository.get_workflow(workflow.id)
-    assert refreshed is not None, "workflow was read at the top of this call; it cannot vanish"
-    return refreshed
+        refreshed = await repository.get_workflow(workflow.id)
+        assert refreshed is not None, "workflow was read at the top of this call; it cannot vanish"
+        logger.info("workflow_run_completed", status=refreshed.status)
+        return refreshed

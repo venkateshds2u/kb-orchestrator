@@ -13,6 +13,18 @@ workflow's steps are different *roles* ("research", "draft", ...), not
 turns in one chat. Chaining context between steps (Step 6) happens by
 composing a step's `message` text to include a prior step's result, not
 by threading kb-agent's conversation history across unrelated calls.
+
+Step 10: `send_message`'s signature stays unchanged (no `workflow_id`/
+`step_id` parameters) -- correlation ids are read from whatever
+`execution.py` already bound via `structlog.contextvars` and sent as
+`X-Workflow-Id`/`X-Step-Id` headers. This reuses the same ambient-context
+mechanism as this app's own log correlation instead of threading two more
+parameters through `AgentClient`'s whole call chain (and every test
+double implementing it) for a value the caller has usually already bound
+anyway. kb-agent doesn't read or log these headers today -- sending them
+is forward-compatible plumbing, not a claim that cross-service log
+correlation is fully wired up end to end; that would need changes on
+kb-agent's side, out of reach from this project alone.
 """
 
 import json
@@ -20,6 +32,7 @@ from collections.abc import AsyncIterator
 from typing import Protocol
 
 import httpx
+import structlog
 from pydantic import BaseModel
 
 
@@ -106,7 +119,7 @@ class HttpAgentClient:
                 "POST",
                 "/chat",
                 json={"message": message, "history": []},
-                headers={"Authorization": f"Bearer {self._auth_token}"},
+                headers=self._headers(),
             ) as response:
                 response.raise_for_status()
                 async for event, data in _iter_sse(response):
@@ -120,3 +133,12 @@ class HttpAgentClient:
         if done_data is None:
             raise AgentCallError("kb-agent's response stream ended without a 'done' event")
         return AgentChatResult.model_validate_json(done_data)
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Authorization": f"Bearer {self._auth_token}"}
+        context = structlog.contextvars.get_contextvars()
+        if "workflow_id" in context:
+            headers["X-Workflow-Id"] = str(context["workflow_id"])
+        if "step_id" in context:
+            headers["X-Step-Id"] = str(context["step_id"])
+        return headers

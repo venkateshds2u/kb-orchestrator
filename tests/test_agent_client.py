@@ -13,8 +13,15 @@ drew.
 
 import httpx
 import pytest
+import structlog
 
 from kb_orchestrator.agent_client import AgentCallError, HttpAgentClient
+
+_DONE_BODY_OK = (
+    '{"text": "ok", "tool_calls": [], "iterations": 1, "stop_reason": "end_turn", '
+    '"hit_iteration_limit": false, "hit_token_budget": false, '
+    '"execution_failure": null, "input_tokens": 1, "output_tokens": 1}'
+)
 
 
 def _sse_response(events: list[tuple[str, str]], *, status_code: int = 200) -> httpx.Response:
@@ -107,3 +114,37 @@ async def test_send_message_raises_on_connection_error() -> None:
 
     with pytest.raises(AgentCallError):
         await client.send_message("hello")
+
+
+# --- correlation header propagation (Step 10) -------------------------------
+
+
+async def test_send_message_includes_correlation_headers_when_context_is_bound() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _sse_response([("done", _DONE_BODY_OK)])
+
+    client = HttpAgentClient(_client_with_transport(httpx.MockTransport(handler)), auth_token="t")
+
+    with structlog.contextvars.bound_contextvars(workflow_id="w1", step_id="research"):
+        await client.send_message("hello")
+
+    assert captured[0].headers["x-workflow-id"] == "w1"
+    assert captured[0].headers["x-step-id"] == "research"
+
+
+async def test_send_message_omits_correlation_headers_when_no_context_is_bound() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _sse_response([("done", _DONE_BODY_OK)])
+
+    client = HttpAgentClient(_client_with_transport(httpx.MockTransport(handler)), auth_token="t")
+
+    await client.send_message("hello")
+
+    assert "x-workflow-id" not in captured[0].headers
+    assert "x-step-id" not in captured[0].headers
