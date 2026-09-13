@@ -33,6 +33,52 @@ lives entirely on the other side of that boundary.
 
 ## Decisions log
 
+### Step 9 — Human-in-the-loop
+- **Approval gates *success*, not *starting* the step.** Two readings of
+  "requires approval" were possible: a human signs off before the step
+  even runs, or the agent runs and produces a result that then needs
+  sign-off before it counts as final. The second was chosen: kb-agent's
+  job is producing a draft/answer, and it makes more sense for a human to
+  review the actual output ("approve this draft email") than to approve
+  an *intent* to call the agent, which by itself has nothing concrete to
+  evaluate. `Step.result` is populated as soon as the call succeeds,
+  whether or not approval is required -- only `status` differs.
+- **A pending approval blocks only its own dependents, not the whole
+  workflow -- the exact same isolation principle Step 7 established for
+  failures, applied to a second kind of "can't proceed right now."**
+  `waiting_ids` is tracked alongside `failed_ids` in the wave loop for
+  precisely this reason: both mean "this step's dependents can't run,"
+  but only a failure is *permanent* -- a waiting step might still
+  complete, just not within this call. Reusing the same
+  blocking-not-stopping shape Step 7 built, rather than inventing a
+  parallel mechanism, is what made this step's actual new logic small.
+- **Rejecting a step reuses `Step.error`, not a new `rejection_reason`
+  field.** From `Workflow.status`'s point of view (Step 3's derivation
+  logic, unchanged by this step), a rejected step and an agent-failed step
+  are the same thing: `failed`, blocking the same way, for the same
+  reason a workflow needs to know about. Two fields carrying
+  semantically the same information (why did this step not produce an
+  accepted outcome) would be exactly the kind of duplicated truth Step 3
+  already ruled out for `Workflow.status` itself -- the same reasoning
+  applies here.
+- **No approver identity is recorded.** A real production HITL feature
+  would want to know *who* approved or rejected something, not just that
+  it happened. This system has no user/identity concept anywhere yet --
+  there's nothing to attribute an approval to that would mean anything --
+  so recording an approver now would be a field with no real content,
+  not a feature. Named here as a genuine gap versus a production system,
+  not solved because nothing in this curriculum introduces authentication.
+- **A real bug, caught by writing the very first test for this step's
+  `run_workflow` behavior, not anticipated while writing the
+  implementation.** The wave loop's original two-way split (`if
+  "succeeded": completed[...] else: failed_ids.add(...)`) treated
+  anything non-succeeded as a permanent failure -- correct before this
+  step, wrong now that a third, non-permanent outcome exists. The fix (a
+  three-way split, tracking `waiting_ids` separately) is a direct
+  consequence of Step 9 adding a genuinely new *kind* of non-success, not
+  a bug in the code that existed before this step -- that code was
+  complete and correct for the two outcomes it was written to handle.
+
 ### Step 8 — Retries & failure handling
 - **Both `AgentCallError` and `execution_failure` are retried the same
   way, even though Step 5 deliberately kept them as distinct

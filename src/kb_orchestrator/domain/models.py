@@ -46,6 +46,14 @@ class Step(BaseModel):
     # has no other sensible value, so there's no ambiguity a default
     # could paper over.
     attempt: int = Field(default=0, ge=0)
+    # Step 9: when true, a successful agent call doesn't become
+    # `succeeded` outright -- it becomes `waiting_for_approval` (the
+    # result is ready, just not yet signed off), and only a human calling
+    # `WorkflowService.approve_step`/`reject_step` moves it to its real
+    # final state. A failure is still just a failure either way --
+    # approval only gates the *success* path, since there's nothing to
+    # approve about an agent call that didn't produce an answer.
+    requires_approval: bool = False
     created_at: datetime
     updated_at: datetime
 

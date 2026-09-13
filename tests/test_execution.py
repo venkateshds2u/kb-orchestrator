@@ -22,6 +22,7 @@ from kb_orchestrator.agent_client import AgentCallError, AgentChatResult, AgentE
 from kb_orchestrator.config import Settings
 from kb_orchestrator.db.repository import WorkflowRepository
 from kb_orchestrator.domain.models import Step, Workflow
+from kb_orchestrator.domain.service import WorkflowService
 from kb_orchestrator.execution import (
     DependencyCycleError,
     execute_step,
@@ -51,6 +52,7 @@ def _step(
     depends_on: list[str] | None = None,
     status: str = "pending",
     result: str | None = None,
+    requires_approval: bool = False,
 ) -> Step:
     return Step(
         id=id,
@@ -59,6 +61,7 @@ def _step(
         depends_on=depends_on or [],
         status=status,  # type: ignore[arg-type]
         result=result,
+        requires_approval=requires_approval,
         created_at=_NOW,
         updated_at=_NOW,
     )
@@ -549,3 +552,110 @@ async def test_run_workflow_resuming_an_already_succeeded_step_keeps_its_attempt
     final = await run_workflow(_ScriptedClient([]), repo, workflow, _settings())
 
     assert final.steps[0].attempt == 2  # untouched -- this step was never re-run
+
+
+# --- human-in-the-loop (Step 9) ---------------------------------------------
+
+
+async def test_run_workflow_pauses_a_requires_approval_step_instead_of_succeeding(
+    db_connection: aiosqlite.Connection,
+) -> None:
+    workflow = Workflow(
+        id="w1",
+        name="wf",
+        steps=[_step("a", requires_approval=True)],
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    repo = WorkflowRepository(db_connection)
+    await repo.create_workflow(workflow)
+    client = _ScriptedClient([_result(text="a draft")])
+
+    final = await run_workflow(client, repo, workflow, _settings())
+
+    assert final.steps[0].status == "waiting_for_approval"
+    assert final.steps[0].result == "a draft"
+    assert final.status == "waiting_for_approval"
+
+
+async def test_run_workflow_blocks_a_dependent_of_a_waiting_step(
+    db_connection: aiosqlite.Connection,
+) -> None:
+    workflow = Workflow(
+        id="w1",
+        name="wf",
+        steps=[
+            _step("a", requires_approval=True),
+            _step("b", depends_on=["a"]),
+        ],
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    repo = WorkflowRepository(db_connection)
+    await repo.create_workflow(workflow)
+    client = _ScriptedClient([_result(text="a draft")])
+
+    final = await run_workflow(client, repo, workflow, _settings())
+
+    by_id = {s.id: s for s in final.steps}
+    assert by_id["a"].status == "waiting_for_approval"
+    assert by_id["b"].status == "pending"  # blocked, but not permanently
+    assert len(client.messages) == 1  # "b" was never attempted
+
+
+async def test_run_workflow_keeps_running_an_independent_branch_despite_a_pending_approval(
+    db_connection: aiosqlite.Connection,
+) -> None:
+    workflow = Workflow(
+        id="w1",
+        name="wf",
+        steps=[_step("a", requires_approval=True), _step("independent")],
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    repo = WorkflowRepository(db_connection)
+    await repo.create_workflow(workflow)
+    client = _ScriptedClient([_result(text="a draft"), _result(text="done")])
+
+    final = await run_workflow(client, repo, workflow, _settings())
+
+    by_id = {s.id: s for s in final.steps}
+    assert by_id["a"].status == "waiting_for_approval"
+    assert by_id["independent"].status == "succeeded"
+
+
+async def test_run_workflow_resumes_a_dependent_after_the_waiting_step_is_approved(
+    db_connection: aiosqlite.Connection,
+) -> None:
+    """The whole point of Step 9: a human decision, not a retry, is what
+    unblocks a dependent -- simulated here via WorkflowService.approve_step
+    between two separate run_workflow calls, exactly how Step 11's HTTP
+    API will actually drive this."""
+    workflow = Workflow(
+        id="w1",
+        name="wf",
+        steps=[_step("a", requires_approval=True), _step("b", depends_on=["a"])],
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    repo = WorkflowRepository(db_connection)
+    await repo.create_workflow(workflow)
+
+    first_pass = await run_workflow(
+        _ScriptedClient([_result(text="a draft")]), repo, workflow, _settings()
+    )
+    assert first_pass.steps[0].status == "waiting_for_approval"
+
+    await WorkflowService(repo).approve_step("w1", "a")
+
+    approved_workflow = await repo.get_workflow("w1")
+    assert approved_workflow is not None
+    second_pass = await run_workflow(
+        _ScriptedClient([_result(text="b done")]), repo, approved_workflow, _settings()
+    )
+
+    by_id = {s.id: s for s in second_pass.steps}
+    assert by_id["a"].status == "succeeded"
+    assert by_id["b"].status == "succeeded"
+    assert by_id["b"].result == "b done"
+    assert second_pass.status == "succeeded"

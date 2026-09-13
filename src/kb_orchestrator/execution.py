@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from kb_orchestrator.agent_client import AgentCallError, AgentClient
 from kb_orchestrator.config import Settings
 from kb_orchestrator.db.repository import WorkflowRepository
-from kb_orchestrator.domain.models import Step, Workflow
+from kb_orchestrator.domain.models import Step, StepStatus, Workflow
 
 
 async def execute_step(client: AgentClient, step: Step) -> Step:
@@ -27,6 +27,13 @@ async def execute_step(client: AgentClient, step: Step) -> Step:
     them, though `error`'s text still names which one happened):
     `AgentCallError` (the HTTP call itself broke) and a `execution_failure`
     in an otherwise-successful response (kb-agent's own tool call broke).
+
+    A successful call becomes `succeeded` -- unless `step.requires_approval`
+    (Step 9), in which case it becomes `waiting_for_approval` instead, with
+    the same `result` already attached: the agent's answer exists, it just
+    isn't final until a human calls `WorkflowService.approve_step`/
+    `reject_step`. Approval only gates *success*; a failure is a failure
+    regardless of whether the step required sign-off.
     """
     now = datetime.now(UTC)
     try:
@@ -39,7 +46,8 @@ async def execute_step(client: AgentClient, step: Step) -> Step:
             update={"status": "failed", "error": result.execution_failure.error, "updated_at": now}
         )
 
-    return step.model_copy(update={"status": "succeeded", "result": result.text, "updated_at": now})
+    status: StepStatus = "waiting_for_approval" if step.requires_approval else "succeeded"
+    return step.model_copy(update={"status": status, "result": result.text, "updated_at": now})
 
 
 class DependencyCycleError(Exception):
@@ -138,8 +146,8 @@ async def _run_ready_step(
         )
 
         result_step = await execute_step(client, attempt_step)
-        if result_step.status == "succeeded":
-            break
+        if result_step.status in ("succeeded", "waiting_for_approval"):
+            break  # both are terminal-for-this-attempt; neither is a failure to retry
 
     final_step = result_step.model_copy(update={"attempt": attempt})
     await repository.update_step(
@@ -182,6 +190,14 @@ async def run_workflow(
     revisiting once real parallel branches existed: stopping *everything*
     because one independent branch failed would be too broad now that
     "everything" isn't necessarily one chain.
+
+    A step `waiting_for_approval` (Step 9) is left alone -- not re-run --
+    and blocks its own dependents the same way a failure does, but only
+    *for this call*: unlike a failure, it isn't permanent. A later
+    `run_workflow` call, after a human calls `approve_step`, will see that
+    step as `succeeded` and let its dependents proceed. Independent
+    branches that don't depend on the waiting step keep running now,
+    exactly the same reasoning as a failure not blocking unrelated work.
     """
     if workflow.status == "failed":
         return workflow
@@ -194,21 +210,22 @@ async def run_workflow(
 
     completed: dict[str, Step] = {s.id: s for s in workflow.steps if s.status == "succeeded"}
     failed_ids: set[str] = set()
-    remaining = [s for s in workflow.steps if s.id not in completed]
+    waiting_ids: set[str] = {s.id for s in workflow.steps if s.status == "waiting_for_approval"}
+    remaining = [s for s in workflow.steps if s.id not in completed and s.id not in waiting_ids]
 
     while remaining:
         # Ready now: every dependency already succeeded, and none failed
-        # (a failed dependency means this step can never become ready --
-        # not "not yet", but "not ever" -- so it's left out of every
-        # future wave rather than retried against a stale `completed`).
+        # or is still waiting on a human (either means this step can't
+        # run yet -- a failed dependency never will complete; a waiting
+        # one might, but not within this same call).
         ready = [
             step
             for step in remaining
             if all(dep in completed for dep in step.depends_on)
-            and not any(dep in failed_ids for dep in step.depends_on)
+            and not any(dep in failed_ids or dep in waiting_ids for dep in step.depends_on)
         ]
         if not ready:
-            break  # everything left is permanently blocked by a failure
+            break  # everything left is blocked by a failure or a pending approval
 
         results = await asyncio.gather(
             *(
@@ -219,6 +236,8 @@ async def run_workflow(
         for result_step in results:
             if result_step.status == "succeeded":
                 completed[result_step.id] = result_step
+            elif result_step.status == "waiting_for_approval":
+                waiting_ids.add(result_step.id)
             else:
                 failed_ids.add(result_step.id)
 

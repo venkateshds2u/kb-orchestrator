@@ -5,6 +5,41 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Step 9 — Human-in-the-loop
+- `domain/models.py`: `Step.requires_approval: bool = False`. A
+  successful agent call on such a step becomes `waiting_for_approval`
+  instead of `succeeded` (`execute_step`), with the same `result` already
+  attached -- approval only gates *success*; a failure is still just a
+  failure regardless of this flag.
+- `domain/errors.py`: `StepNotFoundError`, `StepNotAwaitingApprovalError`.
+- `domain/service.py`: `StepSpec.requires_approval` (threaded into
+  `create_workflow`); `WorkflowService.approve_step()`/`reject_step()` --
+  move a `waiting_for_approval` step to `succeeded`/`failed`. Rejection
+  reuses `Step.error` for its `reason`, not a new field -- a human
+  rejection and an agent failure are both, from a workflow's point of
+  view, "this step did not produce an accepted outcome."
+- `run_workflow`'s wave loop now tracks `waiting_ids` alongside
+  `failed_ids`: a waiting step is excluded from re-running (it's not
+  re-attempted while a human hasn't decided), and blocks its own
+  dependents the same way a failure does -- but only *for this call*,
+  since approval, unlike a failure, isn't permanent. A later
+  `run_workflow` call after `approve_step` sees the step as `succeeded`
+  and lets dependents proceed normally. Independent branches that don't
+  depend on the waiting step keep running now, the same isolation
+  principle Step 7 established for failures.
+- Found and fixed a real bug while writing the very first `run_workflow`
+  test for this step: a step transitioning to `waiting_for_approval`
+  *during* a wave was falling into the `else: failed_ids.add(...)`
+  branch (only `"succeeded"` was checked explicitly), which would have
+  permanently blocked its dependents instead of just pausing them.
+- 9 new tests: `execute_step` pausing instead of succeeding, a dependent
+  staying `pending` while blocked, an independent branch completing
+  anyway, and the full two-call approve-then-resume flow (`run_workflow`
+  → `approve_step` → `run_workflow` again) that's the actual point of
+  this step -- plus `WorkflowService.approve_step`/`reject_step` unit
+  tests (result kept, reason recorded, not-found and not-awaiting-approval
+  error paths).
+
 ### Step 8 — Retries & failure handling
 - `domain/models.py`: `Step.attempt: int = 0` -- how many times a step
   has actually been attempted, deferred from Step 3 specifically to land
