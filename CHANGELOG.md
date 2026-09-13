@@ -5,6 +5,43 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Step 8 — Retries & failure handling
+- `domain/models.py`: `Step.attempt: int = 0` -- how many times a step
+  has actually been attempted, deferred from Step 3 specifically to land
+  here. Persisted, not just tracked in memory during one `run_workflow`
+  call, so it survives a crash mid-retry-loop like every other piece of
+  step state.
+- `db/migrations/0002_add_step_attempt.sql`: `ALTER TABLE steps ADD
+  COLUMN attempt`. `WorkflowRepository.increment_attempt()` (new): an
+  atomic `attempt = attempt + 1` at the database level, returning the new
+  count -- a separate method from `update_step`, not an extra parameter
+  there, so incrementing can't race a Python-side read-modify-write.
+- `config.py`: `step_max_attempts` (default 3, `1..10`) and
+  `step_retry_backoff_seconds` (default 1.0, exponential: attempt *n*
+  waits `backoff * 2^(n-2)`, no jitter or cap -- not needed for a handful
+  of attempts at most).
+- `_run_ready_step` now retries a failing step in place, up to
+  `step_max_attempts` times, before persisting a final `failed` outcome.
+  Both of `execute_step`'s failure categories (`AgentCallError` and
+  kb-agent's own `execution_failure`) are retried uniformly -- Step 5 kept
+  them distinct specifically so this could differ later without a
+  restructure, but nothing yet demands that distinction.
+- 9 new tests: a transient failure recovering on retry (`attempt == 2`),
+  first-try success recording `attempt == 1`, exhausting all attempts and
+  keeping the *last* attempt's error, exponential backoff durations
+  (`asyncio.sleep` faked to record durations instead of actually
+  waiting -- keeps the suite fast and deterministic), a resumed
+  already-succeeded step's `attempt` count staying untouched, plus
+  `increment_attempt` unit tests and a domain-model default check. Full
+  suite (81 tests) still runs in ~0.1s.
+- Fixed two now-stale tests found by actually running the suite after
+  adding the second migration and the retry loop: `test_running_twice_is_a_noop`
+  hardcoded "1 migration applied" (now 2); the stop-on-failure test's
+  single-failure scripted client was exhausted by the new default retry
+  loop before Step 8 code even existed to explain why -- fixed by
+  disabling retries there explicitly (`step_max_attempts=1`), since that
+  test is about blocking behavior, not retries.
+
 ### Step 7 — Parallel/fan-out execution
 - `run_workflow` rewritten around a wave-based loop: every step whose
   dependencies are already satisfied runs *concurrently* with its

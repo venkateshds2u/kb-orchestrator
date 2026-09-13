@@ -21,14 +21,16 @@ async def test_records_applied_version(db_connection: aiosqlite.Connection) -> N
     versions = {row[0] for row in await cursor.fetchall()}
 
     assert "0001_create_workflows" in versions
+    assert "0002_add_step_attempt" in versions
 
 
 async def test_running_twice_is_a_noop(db_connection: aiosqlite.Connection) -> None:
     # The fixture already applied migrations once; applying again must not
-    # try to re-run CREATE TABLE and blow up with "table already exists".
+    # try to re-run CREATE TABLE/ALTER TABLE and blow up with "table
+    # already exists" / "duplicate column name".
     await apply_migrations(db_connection)
 
     cursor = await db_connection.execute("SELECT COUNT(*) FROM schema_migrations")
     row = await cursor.fetchone()
     assert row is not None
-    assert row[0] == 1
+    assert row[0] == 2  # 0001 + 0002, each applied exactly once

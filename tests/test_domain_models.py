@@ -42,6 +42,7 @@ def test_step_defaults_to_pending_with_no_result_or_error() -> None:
     assert step.status == "pending"
     assert step.result is None
     assert step.error is None
+    assert step.attempt == 0
 
 
 def test_step_is_frozen() -> None:

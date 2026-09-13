@@ -9,7 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import HttpUrl, SecretStr, field_validator
+from pydantic import Field, HttpUrl, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -49,6 +49,18 @@ class Settings(BaseSettings):
     # shape as kb-mcp-server's own `db_path` -- not validated for existence
     # here, `open_database` creates the parent directory itself.
     db_path: Path = Path("./data/workflows.sqlite3")
+
+    # Retry policy for one step's own agent call (Step 8) -- a transient
+    # failure (a network blip, kb-agent momentarily unreachable) gets a
+    # few immediate chances before the step is considered genuinely
+    # failed. `ge=1`: 1 means "no retry," not "never run" -- a step is
+    # always attempted at least once.
+    step_max_attempts: int = Field(default=3, ge=1, le=10)
+    # Exponential backoff base: attempt 2 waits this long, attempt 3 waits
+    # twice this, and so on. No jitter, no cap -- real production
+    # refinements this app doesn't need yet for a handful of attempts at
+    # most (le=10 above already bounds how large this could ever grow).
+    step_retry_backoff_seconds: float = Field(default=1.0, gt=0)
 
     @field_validator("log_level", mode="before")
     @classmethod

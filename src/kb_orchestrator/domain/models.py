@@ -38,6 +38,14 @@ class Step(BaseModel):
     status: StepStatus = "pending"
     result: str | None = None
     error: str | None = None
+    # How many times this step has actually been attempted so far (Step
+    # 8) -- persisted (not just held in memory during one run_workflow
+    # call) so it survives a crash mid-retry-loop, same reason every
+    # other piece of step state is persisted. Defaulted to 0, unlike
+    # id/created_at/updated_at: a fresh, never-attempted step genuinely
+    # has no other sensible value, so there's no ambiguity a default
+    # could paper over.
+    attempt: int = Field(default=0, ge=0)
     created_at: datetime
     updated_at: datetime
 

@@ -30,6 +30,7 @@ def _step_to_row(workflow_id: str, step: Step, *, ordinal: int) -> dict[str, obj
         "status": step.status,
         "result": step.result,
         "error": step.error,
+        "attempt": step.attempt,
         "ordinal": ordinal,
         "created_at": step.created_at.isoformat(),
         "updated_at": step.updated_at.isoformat(),
@@ -45,6 +46,7 @@ def _row_to_step(row: aiosqlite.Row) -> Step:
         status=row["status"],
         result=row["result"],
         error=row["error"],
+        attempt=row["attempt"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -79,10 +81,10 @@ class WorkflowRepository:
                 """
                 INSERT INTO steps
                     (workflow_id, id, name, message, depends_on, status, result, error,
-                     ordinal, created_at, updated_at)
+                     attempt, ordinal, created_at, updated_at)
                 VALUES
                     (:workflow_id, :id, :name, :message, :depends_on, :status, :result, :error,
-                     :ordinal, :created_at, :updated_at)
+                     :attempt, :ordinal, :created_at, :updated_at)
                 """,
                 _step_to_row(workflow.id, step, ordinal=ordinal),
             )
@@ -137,3 +139,27 @@ class WorkflowRepository:
         )
         await self._connection.commit()
         return cursor.rowcount > 0
+
+    async def increment_attempt(self, workflow_id: str, step_id: str) -> int:
+        """Atomically bump a step's attempt counter and return the new
+        value (Step 8's retry loop needs to know which attempt number
+        it's on). A separate method from `update_step`, not an extra
+        parameter there: incrementing at the database level (`attempt =
+        attempt + 1`) avoids a read-modify-write race a Python-side
+        `current + 1` would have if this were ever called concurrently
+        for the same step -- not a real risk today (one step only ever
+        runs once at a time), but the atomic form costs nothing extra and
+        is correct regardless.
+        """
+        await self._connection.execute(
+            "UPDATE steps SET attempt = attempt + 1 WHERE workflow_id = ? AND id = ?",
+            (workflow_id, step_id),
+        )
+        await self._connection.commit()
+        cursor = await self._connection.execute(
+            "SELECT attempt FROM steps WHERE workflow_id = ? AND id = ?", (workflow_id, step_id)
+        )
+        row = await cursor.fetchone()
+        assert row is not None, "the UPDATE above only runs for a step id that already exists"
+        attempt: int = row["attempt"]
+        return attempt

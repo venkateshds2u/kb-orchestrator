@@ -17,7 +17,9 @@ from datetime import UTC, datetime
 import aiosqlite
 import pytest
 
+from conftest import REQUIRED_SETTINGS_FIELDS as _REQUIRED
 from kb_orchestrator.agent_client import AgentCallError, AgentChatResult, AgentExecutionFailure
+from kb_orchestrator.config import Settings
 from kb_orchestrator.db.repository import WorkflowRepository
 from kb_orchestrator.domain.models import Step, Workflow
 from kb_orchestrator.execution import (
@@ -28,6 +30,18 @@ from kb_orchestrator.execution import (
 )
 
 _NOW = datetime.now(UTC)
+
+
+def _settings(**overrides: object) -> Settings:
+    # A tiny backoff by default: these tests should run fast, not exercise
+    # real wall-clock delays. Tests specifically about backoff timing
+    # override it explicitly.
+    fields: dict[str, object] = {
+        **_REQUIRED,
+        "step_retry_backoff_seconds": 0.001,
+        **overrides,
+    }
+    return Settings(**fields)  # type: ignore[arg-type]
 
 
 def _step(
@@ -222,7 +236,7 @@ async def test_run_workflow_executes_steps_in_dependency_order(
     await repo.create_workflow(workflow)
     client = _ScriptedClient([_result(text="research findings"), _result(text="draft text")])
 
-    final = await run_workflow(client, repo, workflow)
+    final = await run_workflow(client, repo, workflow, _settings())
 
     assert final.status == "succeeded"
     assert [s.status for s in final.steps] == ["succeeded", "succeeded"]
@@ -238,7 +252,7 @@ async def test_run_workflow_composes_a_dependencys_result_into_the_next_message(
     await repo.create_workflow(workflow)
     client = _ScriptedClient([_result(text="research findings"), _result(text="draft text")])
 
-    await run_workflow(client, repo, workflow)
+    await run_workflow(client, repo, workflow, _settings())
 
     assert client.messages[0] == "find stuff"  # first step: no dependencies, message unchanged
     assert "research findings" in client.messages[1]
@@ -253,7 +267,11 @@ async def test_run_workflow_stops_on_first_failure_leaving_later_steps_pending(
     await repo.create_workflow(workflow)
     client = _ScriptedClient([AgentCallError("boom")])
 
-    final = await run_workflow(client, repo, workflow)
+    # step_max_attempts=1: this test is about the stop-on-failure/blocking
+    # behavior, not retries (Step 8's own concern, tested separately) --
+    # disabling retries keeps its scope focused and its scripted client
+    # simple (one call, one failure).
+    final = await run_workflow(client, repo, workflow, _settings(step_max_attempts=1))
 
     assert final.status == "failed"
     assert final.steps[0].status == "failed"
@@ -293,7 +311,7 @@ async def test_run_workflow_resumes_skipping_already_succeeded_steps(
     await repo.create_workflow(workflow)
     client = _ScriptedClient([_result(text="draft text")])
 
-    final = await run_workflow(client, repo, workflow)
+    final = await run_workflow(client, repo, workflow, _settings())
 
     assert len(client.messages) == 1  # "research" was not re-run
     assert "cached findings" in client.messages[0]
@@ -314,7 +332,7 @@ async def test_run_workflow_on_an_already_failed_workflow_is_a_noop(
     await repo.create_workflow(workflow)
     client = _ScriptedClient([])
 
-    final = await run_workflow(client, repo, workflow)
+    final = await run_workflow(client, repo, workflow, _settings())
 
     assert final == workflow
     assert client.messages == []
@@ -351,7 +369,7 @@ async def test_run_workflow_executes_independent_steps_concurrently(
     await repo.create_workflow(workflow)
     client = _ConcurrencyTrackingClient()
 
-    final = await run_workflow(client, repo, workflow)
+    final = await run_workflow(client, repo, workflow, _settings())
 
     assert client.max_concurrent == 2
     assert final.status == "succeeded"
@@ -373,7 +391,7 @@ async def test_run_workflow_fans_in_multiple_dependencies_into_one_message(
         [_result(text="result a"), _result(text="result b"), _result(text="result c")]
     )
 
-    final = await run_workflow(client, repo, workflow)
+    final = await run_workflow(client, repo, workflow, _settings())
 
     assert final.status == "succeeded"
     # "c" was the third and final call -- both "a" and "b" had already
@@ -408,7 +426,7 @@ async def test_run_workflow_independent_branch_keeps_running_after_a_sibling_fai
                 raise AgentCallError("boom")
             return _result(text="ok")
 
-    final = await run_workflow(_PerStepClient(), repo, workflow)
+    final = await run_workflow(_PerStepClient(), repo, workflow, _settings())
 
     by_id = {s.id: s for s in final.steps}
     assert by_id["fails"].status == "failed"
@@ -431,4 +449,103 @@ async def test_run_workflow_raises_on_a_cyclic_workflow(
     await repo.create_workflow(workflow)
 
     with pytest.raises(DependencyCycleError):
-        await run_workflow(_ScriptedClient([]), repo, workflow)
+        await run_workflow(_ScriptedClient([]), repo, workflow, _settings())
+
+
+# --- retries (Step 8) -------------------------------------------------------
+
+
+async def test_run_workflow_retries_a_transient_failure_and_then_succeeds(
+    db_connection: aiosqlite.Connection,
+) -> None:
+    workflow = Workflow(id="w1", name="wf", steps=[_step("a")], created_at=_NOW, updated_at=_NOW)
+    repo = WorkflowRepository(db_connection)
+    await repo.create_workflow(workflow)
+    client = _ScriptedClient([AgentCallError("blip"), _result(text="recovered")])
+
+    final = await run_workflow(client, repo, workflow, _settings(step_max_attempts=3))
+
+    assert final.steps[0].status == "succeeded"
+    assert final.steps[0].result == "recovered"
+    assert final.steps[0].attempt == 2  # failed once, succeeded on the 2nd try
+
+
+async def test_run_workflow_succeeding_on_the_first_try_records_attempt_one(
+    db_connection: aiosqlite.Connection,
+) -> None:
+    workflow = Workflow(id="w1", name="wf", steps=[_step("a")], created_at=_NOW, updated_at=_NOW)
+    repo = WorkflowRepository(db_connection)
+    await repo.create_workflow(workflow)
+
+    final = await run_workflow(_ScriptedClient([_result(text="ok")]), repo, workflow, _settings())
+
+    assert final.steps[0].attempt == 1
+
+
+async def test_run_workflow_marks_step_failed_after_exhausting_all_attempts(
+    db_connection: aiosqlite.Connection,
+) -> None:
+    workflow = Workflow(id="w1", name="wf", steps=[_step("a")], created_at=_NOW, updated_at=_NOW)
+    repo = WorkflowRepository(db_connection)
+    await repo.create_workflow(workflow)
+    client = _ScriptedClient([AgentCallError("1"), AgentCallError("2"), AgentCallError("3")])
+
+    final = await run_workflow(client, repo, workflow, _settings(step_max_attempts=3))
+
+    assert final.steps[0].status == "failed"
+    assert final.steps[0].error == "3"  # the last attempt's error is what's kept
+    assert final.steps[0].attempt == 3
+
+
+async def test_retry_backoff_grows_exponentially(
+    db_connection: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Proves the actual backoff durations, not just that retries happen
+    -- `asyncio.sleep` is faked (recording durations instead of actually
+    waiting) so this test stays fast and deterministic."""
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("kb_orchestrator.execution.asyncio.sleep", fake_sleep)
+
+    workflow = Workflow(id="w1", name="wf", steps=[_step("a")], created_at=_NOW, updated_at=_NOW)
+    repo = WorkflowRepository(db_connection)
+    await repo.create_workflow(workflow)
+    client = _ScriptedClient([AgentCallError("1"), AgentCallError("2"), AgentCallError("3")])
+
+    await run_workflow(
+        client, repo, workflow, _settings(step_max_attempts=3, step_retry_backoff_seconds=1.0)
+    )
+
+    assert sleeps == [1.0, 2.0]  # none before attempt 1; doubling before 2 and 3
+
+
+async def test_run_workflow_resuming_an_already_succeeded_step_keeps_its_attempt_count(
+    db_connection: aiosqlite.Connection,
+) -> None:
+    workflow = Workflow(
+        id="w1",
+        name="wf",
+        steps=[
+            Step(
+                id="a",
+                name="a",
+                message="do a",
+                status="succeeded",
+                result="cached",
+                attempt=2,
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        ],
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    repo = WorkflowRepository(db_connection)
+    await repo.create_workflow(workflow)
+
+    final = await run_workflow(_ScriptedClient([]), repo, workflow, _settings())
+
+    assert final.steps[0].attempt == 2  # untouched -- this step was never re-run

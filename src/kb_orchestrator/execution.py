@@ -13,6 +13,7 @@ import asyncio
 from datetime import UTC, datetime
 
 from kb_orchestrator.agent_client import AgentCallError, AgentClient
+from kb_orchestrator.config import Settings
 from kb_orchestrator.db.repository import WorkflowRepository
 from kb_orchestrator.domain.models import Step, Workflow
 
@@ -106,29 +107,54 @@ async def _run_ready_step(
     workflow_id: str,
     step: Step,
     completed: dict[str, Step],
+    settings: Settings,
 ) -> Step:
     """Run one step that's already known to be ready (all its
-    dependencies are in `completed`), persisting both the `running`
-    transition and the final outcome."""
-    message = _compose_message(step, completed)
-    await repository.update_step(
-        workflow_id, step.id, status="running", updated_at=datetime.now(UTC)
-    )
+    dependencies are in `completed`), retrying on failure up to
+    `settings.step_max_attempts` times with exponential backoff before
+    persisting a final `failed` outcome.
 
-    result_step = await execute_step(client, step.model_copy(update={"message": message}))
+    Both of `execute_step`'s failure categories (`AgentCallError` and
+    kb-agent's own `execution_failure`) are retried the same way here --
+    Step 5 kept them as genuinely distinct exception/data shapes
+    specifically so a future refinement (e.g. don't retry a considered,
+    deterministic `execution_failure`) could treat them differently
+    without restructuring anything; nothing yet demands that distinction,
+    so retrying both uniformly is the correct amount of behavior for now.
+    """
+    message = _compose_message(step, completed)
+    attempt_step = step.model_copy(update={"message": message})
+
+    result_step = step
+    attempt = 0
+    for attempt_number in range(1, settings.step_max_attempts + 1):
+        if attempt_number > 1:
+            backoff = settings.step_retry_backoff_seconds * (2 ** (attempt_number - 2))
+            await asyncio.sleep(backoff)
+
+        attempt = await repository.increment_attempt(workflow_id, step.id)
+        await repository.update_step(
+            workflow_id, step.id, status="running", updated_at=datetime.now(UTC)
+        )
+
+        result_step = await execute_step(client, attempt_step)
+        if result_step.status == "succeeded":
+            break
+
+    final_step = result_step.model_copy(update={"attempt": attempt})
     await repository.update_step(
         workflow_id,
         step.id,
-        status=result_step.status,
-        result=result_step.result,
-        error=result_step.error,
-        updated_at=result_step.updated_at,
+        status=final_step.status,
+        result=final_step.result,
+        error=final_step.error,
+        updated_at=final_step.updated_at,
     )
-    return result_step
+    return final_step
 
 
 async def run_workflow(
-    client: AgentClient, repository: WorkflowRepository, workflow: Workflow
+    client: AgentClient, repository: WorkflowRepository, workflow: Workflow, settings: Settings
 ) -> Workflow:
     """Execute `workflow` wave by wave: every step whose dependencies are
     already satisfied runs *concurrently* with its wave-mates, persisting
@@ -141,8 +167,13 @@ async def run_workflow(
     Resumable: a step already `succeeded` (from a prior, interrupted run
     of this same workflow) is skipped, its existing result reused as
     context for whatever depends on it, rather than re-run. A workflow
-    already `failed` is returned untouched -- deciding whether/how to
-    retry a failed step is Step 8's job, not this function's.
+    already `failed` is returned untouched -- Step 8's retries are
+    *within* one attempt at a step (immediate backoff-and-retry for a
+    transient failure, inside `_run_ready_step`), not a mechanism for
+    re-running a workflow that already exhausted those retries and
+    reached a considered `failed` state; re-attempting a permanently
+    failed step is a coarser-grained decision this function doesn't make
+    on its own.
 
     A step failing blocks only *its own* downstream dependents (they can
     never satisfy "all dependencies completed", so they stay `pending`
@@ -180,7 +211,10 @@ async def run_workflow(
             break  # everything left is permanently blocked by a failure
 
         results = await asyncio.gather(
-            *(_run_ready_step(client, repository, workflow.id, step, completed) for step in ready)
+            *(
+                _run_ready_step(client, repository, workflow.id, step, completed, settings)
+                for step in ready
+            )
         )
         for result_step in results:
             if result_step.status == "succeeded":

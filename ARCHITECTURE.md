@@ -33,6 +33,51 @@ lives entirely on the other side of that boundary.
 
 ## Decisions log
 
+### Step 8 — Retries & failure handling
+- **Both `AgentCallError` and `execution_failure` are retried the same
+  way, even though Step 5 deliberately kept them as distinct
+  exception/data shapes.** Considered treating them differently now (e.g.
+  retry a transient `AgentCallError` more readily than a `execution_failure`
+  representing kb-agent's own already-considered failure) and decided
+  against it for this step: nothing in this curriculum's own scenarios
+  demonstrates a real difference in how these should be retried, and
+  Step 5's whole point in keeping them distinct was to make that future
+  refinement *possible* without restructuring anything, not to force it
+  now before there's a concrete reason.
+- **`increment_attempt` is its own repository method, not a new parameter
+  on `update_step`.** An atomic `UPDATE steps SET attempt = attempt + 1`
+  at the database level can't lose an increment the way a Python-side
+  "read current attempt, add one, write it back" could under concurrent
+  access. Not a real risk today (one step is only ever being retried by
+  one code path at a time), but the atomic form costs nothing extra and
+  removes the question entirely rather than trusting a invariant that
+  happens to hold for now.
+- **Exponential backoff, no jitter, no cap -- named as real production
+  refinements this app doesn't need yet, not omissions.** Jitter exists to
+  prevent many clients from retrying in lockstep and re-overwhelming a
+  struggling service; a cap exists to bound how long a single retry
+  sequence can stretch out. Both are genuine concerns at real production
+  scale. At `step_max_attempts`'s own upper bound (10), even uncapped
+  exponential backoff from a 1-second base stays small (session lifetime
+  in seconds, not hours) -- there's no problem here for a cap to solve
+  yet, and jitter matters at a scale (many concurrent clients hammering
+  one shared service) this project doesn't operate at.
+- **Two real regressions found by actually running the suite after
+  landing this step's code, not anticipated in advance.** Adding a second
+  migration file broke a test that had hardcoded "exactly 1 migration
+  applied" -- a reasonable assumption when it was written, invalidated by
+  this step's own schema change, not a design flaw in either. More
+  interestingly: the *existing* stop-on-failure test from Step 6 broke
+  because the new default retry loop now attempts a failing step 3 times
+  before giving up, exhausting that test's single-failure scripted
+  client on the 2nd attempt with an unrelated `IndexError`. Both fixed
+  directly (updating the stale count; disabling retries via
+  `step_max_attempts=1` for a test that was never about retries in the
+  first place) -- exactly the kind of interaction between an old test's
+  implicit assumptions and new step's behavior this curriculum's
+  "build the next thing, let it surface what came before" discipline
+  exists to catch.
+
 ### Step 7 — Parallel/fan-out execution
 - **A failure blocks only its downstream dependents, not the whole
   workflow -- resolving the exact tension Step 6 flagged and deferred,

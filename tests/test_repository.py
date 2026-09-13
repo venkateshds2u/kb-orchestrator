@@ -154,3 +154,45 @@ async def test_steps_from_different_workflows_can_share_an_id(
     assert second is not None
     assert {s.id for s in first.steps} == {"a", "b"}
     assert {s.id for s in second.steps} == {"a", "b"}
+
+
+async def test_new_step_starts_at_attempt_zero(db_connection: aiosqlite.Connection) -> None:
+    repo = WorkflowRepository(db_connection)
+    await repo.create_workflow(_workflow())
+
+    fetched = await repo.get_workflow("w1")
+
+    assert fetched is not None
+    assert all(s.attempt == 0 for s in fetched.steps)
+
+
+async def test_increment_attempt_bumps_and_returns_the_new_count(
+    db_connection: aiosqlite.Connection,
+) -> None:
+    repo = WorkflowRepository(db_connection)
+    await repo.create_workflow(_workflow())
+
+    first = await repo.increment_attempt("w1", "a")
+    second = await repo.increment_attempt("w1", "a")
+
+    assert first == 1
+    assert second == 2
+
+    fetched = await repo.get_workflow("w1")
+    assert fetched is not None
+    step_a = next(s for s in fetched.steps if s.id == "a")
+    assert step_a.attempt == 2
+
+
+async def test_increment_attempt_only_affects_the_named_step(
+    db_connection: aiosqlite.Connection,
+) -> None:
+    repo = WorkflowRepository(db_connection)
+    await repo.create_workflow(_workflow())
+
+    await repo.increment_attempt("w1", "a")
+
+    fetched = await repo.get_workflow("w1")
+    assert fetched is not None
+    step_b = next(s for s in fetched.steps if s.id == "b")
+    assert step_b.attempt == 0
